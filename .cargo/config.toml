@@ -1,0 +1,5 @@
+# Build for the machine doing the compiling. This engine is not distributed as a
+# portable binary; recompile on the target host. Remove or override for CI that
+# publishes artifacts.
+[build]
+rustflags = ["-C", "target-cpu=native"]
