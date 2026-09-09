@@ -1,0 +1,20 @@
+# Rust / Cargo build output
+/target
+**/*.rs.bk
+
+# MSVC debug info
+*.pdb
+
+# Criterion output
+/criterion
+
+# NNUE nets and datagen output (large binaries; store out of tree)
+*.nnue
+/data
+/nets
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/

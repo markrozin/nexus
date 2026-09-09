@@ -1,0 +1,52 @@
+# Workspace root. The engine crate below is the sole member for now; add future
+# crates (e.g. a trainer or a UCI shim) to `members`.
+[workspace]
+resolver = "2"
+members = []
+
+[package]
+name = "newchessbot"
+version = "0.1.0"
+edition = "2021"
+description = "A chess engine: minimax with alpha-beta pruning, quiescence search, and an NNUE evaluation."
+license = "MIT OR Apache-2.0"
+repository = ""
+publish = false
+
+[[bin]]
+name = "newchessbot"
+path = "src/main.rs"
+
+# Empty criterion target. Add benchmark functions to benches/engine.rs.
+[[bench]]
+name = "engine"
+harness = false
+
+[features]
+default = []
+# Data generation for NNUE training. Pulls in rayon; not used by the engine at runtime.
+datagen = ["dep:rayon"]
+
+[dependencies]
+# Stack-allocated move lists in the hot path; no heap allocation inside search.
+arrayvec = "0.7"
+
+# Parallelism for datagen only. Never referenced from the search hot path.
+rayon = { version = "1", optional = true }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+# Fast iteration: optimized enough to play, but keeps debug assertions and
+# overflow checks on. Build with `cargo build --profile dev-fast`.
+[profile.dev-fast]
+inherits = "dev"
+opt-level = 2
+debug-assertions = true
+overflow-checks = true
