@@ -36,6 +36,8 @@ default = []
 datagen = ["dep:rayon"]
 # Offline magic-constant search. Not part of any engine build.
 magicgen = []
+# Opening-book generation for match testing. Not part of any engine build.
+bookgen = []
 
 [dependencies]
 # Stack-allocated move lists in the hot path; no heap allocation inside search.
@@ -65,3 +67,8 @@ overflow-checks = true
 name = "magicgen"
 path = "src/bin/magicgen.rs"
 required-features = ["magicgen"]
+
+[[bin]]
+name = "bookgen"
+path = "src/bin/bookgen.rs"
+required-features = ["bookgen"]

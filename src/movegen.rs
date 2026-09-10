@@ -20,12 +20,34 @@ pub const MAX_MOVES: usize = 256;
 
 pub type MoveList = ArrayVec<Move, MAX_MOVES>;
 
+/// What to generate.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GenMode {
+    /// Everything legal.
+    All,
+    /// Captures, en passant, and promotions only — what quiescence searches.
+    /// Castling is excluded by construction, and quiet moves are skipped.
+    Tactical,
+}
+
 /// Every legal move in `pos`. An empty list means checkmate or stalemate;
 /// distinguish with [`Position::in_check`].
 pub fn generate_legal(pos: &Position) -> MoveList {
+    generate(pos, GenMode::All)
+}
+
+/// Legal captures, en passant, and promotions.
+///
+/// An empty list here means nothing tactical is available, *not* that the
+/// position is terminal — quiescence relies on that distinction.
+pub fn generate_tactical(pos: &Position) -> MoveList {
+    generate(pos, GenMode::Tactical)
+}
+
+fn generate(pos: &Position, mode: GenMode) -> MoveList {
     let us = pos.side_to_move();
     let mut legal = MoveList::new();
-    for mv in generate_pseudo_legal(pos) {
+    for mv in generate_pseudo_legal(pos, mode) {
         if !pos.make_move(mv).in_check(us) {
             legal.push(mv);
         }
@@ -37,31 +59,40 @@ pub fn generate_legal(pos: &Position) -> MoveList {
 /// mover in check. Castling is fully validated here (empty path, not castling
 /// out of, through, or into check) because those conditions are not expressible
 /// as a king-attack test on the resulting position.
-pub fn generate_pseudo_legal(pos: &Position) -> MoveList {
+pub fn generate_pseudo_legal(pos: &Position, mode: GenMode) -> MoveList {
     let mut list = MoveList::new();
     let us = pos.side_to_move();
     let own = pos.colored(us);
     let occupied = pos.occupied();
 
-    generate_pawn_moves(pos, us, &mut list);
+    // In tactical mode a piece may only land on an enemy square; `!own` for a
+    // full generation is the same mask with the empty squares added back.
+    let targets = match mode {
+        GenMode::All => !own,
+        GenMode::Tactical => pos.colored(us.flip()),
+    };
+
+    generate_pawn_moves(pos, us, mode, &mut list);
 
     for from in pos.pieces(us, PieceType::Knight) {
-        push_targets(pos, from, knight_attacks(from) - own, &mut list);
+        push_targets(pos, from, knight_attacks(from) & targets, &mut list);
     }
     for from in pos.pieces(us, PieceType::Bishop) {
-        push_targets(pos, from, bishop_attacks(from, occupied) - own, &mut list);
+        push_targets(pos, from, bishop_attacks(from, occupied) & targets, &mut list);
     }
     for from in pos.pieces(us, PieceType::Rook) {
-        push_targets(pos, from, rook_attacks(from, occupied) - own, &mut list);
+        push_targets(pos, from, rook_attacks(from, occupied) & targets, &mut list);
     }
     for from in pos.pieces(us, PieceType::Queen) {
-        push_targets(pos, from, queen_attacks(from, occupied) - own, &mut list);
+        push_targets(pos, from, queen_attacks(from, occupied) & targets, &mut list);
     }
     for from in pos.pieces(us, PieceType::King) {
-        push_targets(pos, from, king_attacks(from) - own, &mut list);
+        push_targets(pos, from, king_attacks(from) & targets, &mut list);
     }
 
-    generate_castles(pos, us, &mut list);
+    if mode == GenMode::All {
+        generate_castles(pos, us, &mut list);
+    }
     list
 }
 
@@ -95,7 +126,7 @@ fn push_promotions(from: Square, to: Square, capture: bool, list: &mut MoveList)
     }
 }
 
-fn generate_pawn_moves(pos: &Position, us: Color, list: &mut MoveList) {
+fn generate_pawn_moves(pos: &Position, us: Color, mode: GenMode, list: &mut MoveList) {
     let pawns = pos.pieces(us, PieceType::Pawn);
     if pawns.is_empty() {
         return;
@@ -108,8 +139,14 @@ fn generate_pawn_moves(pos: &Position, us: Color, list: &mut MoveList) {
         Color::Black => (Bitboard::RANK_1, Bitboard::RANK_5),
     };
 
+    // A push onto the last rank is tactical even though it captures nothing, so
+    // tactical mode keeps the promoting subset of the quiet pushes.
     let single = pawns.forward(us) & empty;
-    for to in single {
+    let pushes = match mode {
+        GenMode::All => single,
+        GenMode::Tactical => single & last_rank,
+    };
+    for to in pushes {
         let from = to.offset(-push).expect("pushed pawn came from the board");
         if last_rank.contains(to) {
             push_promotions(from, to, false, list);
@@ -118,11 +155,13 @@ fn generate_pawn_moves(pos: &Position, us: Color, list: &mut MoveList) {
         }
     }
 
-    for to in single.forward(us) & empty & double_rank {
-        let from = to
-            .offset(-push * 2)
-            .expect("double-pushed pawn came from the board");
-        list.push(Move::new(from, to, Move::DOUBLE_PAWN));
+    if mode == GenMode::All {
+        for to in single.forward(us) & empty & double_rank {
+            let from = to
+                .offset(-push * 2)
+                .expect("double-pushed pawn came from the board");
+            list.push(Move::new(from, to, Move::DOUBLE_PAWN));
+        }
     }
 
     // `east`/`west` are absolute board directions, so the origin offset differs
@@ -253,6 +292,59 @@ mod tests {
             "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
             &[44, 1486, 62_379],
         );
+    }
+
+    /// `generate_tactical` must be exactly the capture-and-promotion subset of
+    /// `generate_legal` — no extras, and nothing dropped. Quiescence relies on
+    /// both halves.
+    #[test]
+    fn tactical_generation_is_the_capture_subset() {
+        for fen in [
+            START_FEN,
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1",
+            "rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "4k3/8/8/8/8/8/8/4K3 w - - 0 1",
+        ] {
+            let pos: Position = fen.parse().expect("test fen is valid");
+            let all = generate_legal(&pos);
+            let tactical = generate_tactical(&pos);
+
+            for mv in &tactical {
+                assert!(all.contains(mv), "{mv} is not legal in {fen}");
+                assert!(
+                    mv.is_capture() || mv.is_promotion(),
+                    "{mv} is quiet but was generated as tactical in {fen}"
+                );
+                assert!(!mv.is_castle(), "castling is never tactical");
+            }
+            let expected = all
+                .iter()
+                .filter(|mv| mv.is_capture() || mv.is_promotion())
+                .count();
+            assert_eq!(tactical.len(), expected, "count mismatch in {fen}");
+        }
+    }
+
+    #[test]
+    fn tactical_generation_keeps_en_passant_and_promotions() {
+        // En passant is a capture even though the target square is empty.
+        let ep: Position = "rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3"
+            .parse()
+            .unwrap();
+        let uci: Vec<String> = generate_tactical(&ep).iter().map(|m| m.to_string()).collect();
+        assert!(uci.contains(&"e5f6".to_string()), "{uci:?}");
+
+        // A quiet push onto the last rank is tactical: all four promotions.
+        let promo: Position = "8/P7/8/8/8/8/8/K6k w - - 0 1".parse().unwrap();
+        let uci: Vec<String> = generate_tactical(&promo)
+            .iter()
+            .map(|m| m.to_string())
+            .collect();
+        for want in ["a7a8q", "a7a8r", "a7a8b", "a7a8n"] {
+            assert!(uci.contains(&want.to_string()), "{want} missing from {uci:?}");
+        }
     }
 
     #[test]

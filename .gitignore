@@ -18,3 +18,9 @@
 *.swp
 .idea/
 .vscode/
+
+# SPRT baseline binaries (large, rebuildable from the tagged commit)
+/baseline/*.exe
+
+# Generated opening books
+/books/
