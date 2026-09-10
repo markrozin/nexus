@@ -34,6 +34,8 @@ harness = false
 default = []
 # Data generation for NNUE training. Pulls in rayon; not used by the engine at runtime.
 datagen = ["dep:rayon"]
+# Offline magic-constant search. Not part of any engine build.
+magicgen = []
 
 [dependencies]
 # Stack-allocated move lists in the hot path; no heap allocation inside search.
@@ -58,3 +60,8 @@ inherits = "dev"
 opt-level = 2
 debug-assertions = true
 overflow-checks = true
+
+[[bin]]
+name = "magicgen"
+path = "src/bin/magicgen.rs"
+required-features = ["magicgen"]

@@ -18,9 +18,8 @@
 use core::fmt;
 use core::str::FromStr;
 
-use crate::bitboard::{
-    bishop_attacks, king_attacks, knight_attacks, pawn_attacks, rook_attacks, Bitboard,
-};
+use crate::bitboard::{king_attacks, knight_attacks, pawn_attacks, Bitboard};
+use crate::magic::{bishop_attacks, rook_attacks};
 use crate::types::{CastlingRights, Color, Move, Piece, PieceType, Square};
 
 pub const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
