@@ -18,9 +18,11 @@
 
 pub mod bitboard;
 pub mod board;
+pub mod eval;
 pub mod magic;
 mod magic_constants;
 pub mod movegen;
 pub mod rng;
+pub mod search;
 pub mod types;
 pub mod uci;
