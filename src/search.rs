@@ -9,9 +9,8 @@
 //! needs an SPRT to justify it. The heuristic layer (PVS, null move, LMR,
 //! futility) does, and none of it is here yet.
 //!
-//! Not yet present, in the order they are coming: quiescence search at the
-//! leaves (so this still walks into the horizon effect and will hang material
-//! to a recapture), a transposition table, and killer/history ordering.
+//! Not yet present, in the order they are coming: a transposition table (and
+//! with it repetition detection), and killer/history move ordering.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -21,7 +20,7 @@ use arrayvec::ArrayVec;
 
 use crate::board::Position;
 use crate::eval::{evaluate, params};
-use crate::movegen::{generate_legal, MoveList};
+use crate::movegen::{generate_legal, generate_tactical, MoveList};
 use crate::types::{Move, PieceType};
 
 /// Hard ceiling on search depth, and the size of every per-ply array.
@@ -242,9 +241,7 @@ impl Search {
             return DRAW;
         }
         if depth <= 0 {
-            // Milestone 6 replaces this with quiescence search. Until then the
-            // search sees whatever capture sequence happens to be in flight.
-            return evaluate(pos);
+            return self.quiescence(pos, alpha, beta, ply);
         }
 
         let mut moves = generate_legal(pos);
@@ -277,6 +274,63 @@ impl Search {
                     self.pv.update(ply, mv);
                     if alpha >= beta {
                         break; // the opponent would never allow this line
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// Search on past a leaf until the position is quiet.
+    ///
+    /// Stopping the search the instant after a capture records the profit and
+    /// never sees the recapture — the horizon effect, and it makes an engine
+    /// hang material with confidence. So at every leaf, keep playing captures
+    /// and promotions until none are left.
+    ///
+    /// The load-bearing idea is the stand-pat: you are not obliged to capture,
+    /// so the static evaluation is a lower bound on what the position is worth.
+    /// If it already beats beta the opponent will avoid this line regardless of
+    /// what the captures do.
+    ///
+    /// There is no depth limit; a capture sequence is finite and terminates on
+    /// its own. `MAX_PLY` is only a backstop against pathological positions.
+    fn quiescence(&mut self, pos: &Position, mut alpha: i32, beta: i32, ply: usize) -> i32 {
+        if self.check_abort() {
+            return DRAW;
+        }
+        if ply >= MAX_PLY - 1 {
+            return evaluate(pos);
+        }
+
+        let stand_pat = evaluate(pos);
+        if stand_pat >= beta {
+            return stand_pat;
+        }
+        if stand_pat > alpha {
+            alpha = stand_pat;
+        }
+
+        let mut moves = generate_tactical(pos);
+        // An empty list here means "nothing to capture", not "no legal moves":
+        // checkmate and stalemate are the caller's business, and a quiet
+        // position correctly returns its stand-pat.
+        order_moves(pos, &mut moves);
+
+        let mut best = stand_pat;
+        for mv in moves {
+            self.nodes += 1;
+            let child = pos.make_move(mv);
+            let score = -self.quiescence(&child, -beta, -alpha, ply + 1);
+            if self.aborted {
+                return DRAW;
+            }
+            if score > best {
+                best = score;
+                if score > alpha {
+                    alpha = score;
+                    if alpha >= beta {
+                        break;
                     }
                 }
             }
@@ -467,9 +521,63 @@ mod tests {
         assert!(result.score > 500, "score was {}", result.score);
     }
 
+    /// Qxd5 wins a pawn and loses the queen to exd5. A depth-1 search sees the
+    /// capture but not the reply; only quiescence plays the recapture out.
+    const POISONED: &str = "4k3/8/4p3/3p4/8/8/8/3QK3 w - - 0 1";
+    /// The same shape with the pawn undefended, so the capture really is free.
+    const FREE_PAWN: &str = "4k3/8/8/3p4/8/8/8/3QK3 w - - 0 1";
+
+    #[test]
+    fn quiescence_refuses_a_poisoned_capture() {
+        let result = search_to_depth(POISONED, 1);
+        assert_ne!(
+            result.best_move.to_string(),
+            "d1d5",
+            "took the poisoned pawn: {result:?}"
+        );
+    }
+
+    #[test]
+    fn quiescence_returns_the_stand_pat_when_every_capture_loses() {
+        let pos: Position = POISONED.parse().unwrap();
+        let mut search = Search::new(Arc::new(AtomicBool::new(false)));
+        let score = search.quiescence(&pos, -INFINITY, INFINITY, 0);
+        // Not obliged to capture, so a position whose only capture is bad is
+        // worth exactly its static evaluation.
+        assert_eq!(score, evaluate(&pos));
+    }
+
+    #[test]
+    fn quiescence_takes_a_free_piece() {
+        let pos: Position = FREE_PAWN.parse().unwrap();
+        let mut search = Search::new(Arc::new(AtomicBool::new(false)));
+        let score = search.quiescence(&pos, -INFINITY, INFINITY, 0);
+        assert!(
+            score > evaluate(&pos),
+            "quiescence {score} did not improve on stand-pat {}",
+            evaluate(&pos)
+        );
+    }
+
+    #[test]
+    fn quiescence_terminates_in_a_capture_heavy_position() {
+        // Nothing bounds the capture sequence except its own length; if that
+        // reasoning is wrong this hangs or blows the stack.
+        let pos: Position = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"
+            .parse()
+            .unwrap();
+        let mut search = Search::new(Arc::new(AtomicBool::new(false)));
+        let score = search.quiescence(&pos, -INFINITY, INFINITY, 0);
+        assert!(score.abs() < MATE_IN_MAX_PLY);
+        assert!(search.nodes() > 0);
+    }
+
     #[test]
     fn alpha_beta_agrees_with_plain_minimax() {
-        // The whole point of alpha-beta is that it is exact. Compare against a
+        // The whole point of alpha-beta is that it is exact. Depth 2 only:
+        // the reference prunes nothing, so its cost is the raw branching
+        // factor times a quiescence call at every leaf.
+        // Compare against a
         // full-window search with pruning defeated by an infinite window.
         for fen in [
             "4k3/8/8/3q4/8/8/8/3RK3 w - - 0 1",
@@ -478,16 +586,20 @@ mod tests {
         ] {
             let pos: Position = fen.parse().unwrap();
             let mut search = Search::new(Arc::new(AtomicBool::new(false)));
-            let ab = search.negamax(&pos, -INFINITY, INFINITY, 4, 0);
-            let plain = minimax(&pos, 4, 0);
+            let ab = search.negamax(&pos, -INFINITY, INFINITY, 2, 0);
+            let plain = minimax(&mut search, &pos, 2, 0);
             assert_eq!(ab, plain, "{fen}");
         }
     }
 
     /// Reference implementation: negamax with no pruning at all.
-    fn minimax(pos: &Position, depth: i32, ply: usize) -> i32 {
+    ///
+    /// Leaves go through full-window quiescence, the same leaf value function
+    /// the real search uses. The claim under test is that *pruning* changes
+    /// nothing, not that the two use different evaluators.
+    fn minimax(search: &mut Search, pos: &Position, depth: i32, ply: usize) -> i32 {
         if depth <= 0 {
-            return evaluate(pos);
+            return search.quiescence(pos, -INFINITY, INFINITY, ply);
         }
         let moves = generate_legal(pos);
         if moves.is_empty() {
@@ -499,7 +611,7 @@ mod tests {
         }
         let mut best = -INFINITY;
         for mv in moves {
-            best = best.max(-minimax(&pos.make_move(mv), depth - 1, ply + 1));
+            best = best.max(-minimax(search, &pos.make_move(mv), depth - 1, ply + 1));
         }
         best
     }
