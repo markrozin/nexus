@@ -2,7 +2,31 @@
 
 A chess engine in Rust: minimax with alpha-beta pruning, quiescence search, and
 an NNUE evaluation. This file is the source of truth for cross-cutting
-conventions. Engine code does not exist yet; this is the skeleton.
+conventions.
+
+## Layout
+
+The engine is a library (`src/lib.rs`); the binary is only the stdin loop.
+
+| Module | Holds |
+| --- | --- |
+| `types` | `Square`, `Move`, `Color`, `PieceType`, `Piece`, `CastleRights` |
+| `bitboard` | `Bitboard`, jump-piece tables, sliding attacks |
+| `board` | `Position`, FEN I/O, `make_move` |
+| `movegen` | legal move generation, `perft` |
+| `rng` | xorshift64\* PRNG |
+| `uci` | protocol handler, search worker thread |
+
+Not yet written: search, evaluation, NNUE, transposition table. `go` answers
+with a random legal move.
+
+## Correctness
+
+Move generation is guarded by `perft` against the Chess Programming Wiki's
+reference node counts (`movegen::tests`). Any change to `movegen`, `make_move`,
+or the attack code must keep those passing — they are the regression net for
+every optimization that follows (magic bitboards, pin-aware generation,
+make/unmake).
 
 ## Board representation
 
@@ -21,6 +45,19 @@ conventions. Engine code does not exist yet; this is the skeleton.
   `-score` and `alpha`/`beta` window arithmetic never overflow. Never use
   `i32::MIN` as a window bound (`-i32::MIN` overflows) — use a named
   `INFINITY` constant strictly inside the range.
+
+## Threading
+
+- Stdin is read on the main thread; `go` spawns a search worker with
+  `std::thread::spawn`. The two share an `Arc<AtomicBool>` stop flag, polled
+  with `Ordering::Relaxed` — the flag carries no data, so it only needs to
+  become visible eventually, and `join` provides the real synchronization.
+- `stop`, `ucinewgame`, and `quit` all join the worker before returning, so
+  `bestmove` is always written before the next command is processed. Tests rely
+  on this for deterministic transcripts.
+- Protocol output goes through a `uci::Sink` (cloneable + `Send`), so the
+  command loop and the worker write to the same place and tests can capture a
+  whole session into a buffer.
 
 ## Search
 

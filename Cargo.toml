@@ -8,10 +8,18 @@ members = []
 name = "newchessbot"
 version = "0.1.0"
 edition = "2021"
+# `let ... else` in the UCI parser.
+rust-version = "1.70"
 description = "A chess engine: minimax with alpha-beta pruning, quiescence search, and an NNUE evaluation."
 license = "MIT OR Apache-2.0"
 repository = ""
 publish = false
+
+# The engine lives in the library (src/lib.rs) so tests and benches can reach
+# it; the binary is just the stdin loop.
+[lib]
+name = "newchessbot"
+path = "src/lib.rs"
 
 [[bin]]
 name = "newchessbot"
