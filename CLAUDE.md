@@ -32,6 +32,47 @@ make/unmake).
 the bitboards agree. `movegen::tests::make_move_preserves_the_dual_representation`
 walks the move tree calling it at every node.
 
+Full-depth perft targets. All six are required before milestone 3 closes:
+
+| Position | Depth | Nodes |
+| --- | --- | --- |
+| startpos | 6 | 119,060,324 |
+| Kiwipete | 5 | 193,690,690 |
+| Position 3 | 7 | 178,633,661 |
+| Position 4 | 6 | 706,045,033 |
+| Position 5 | 5 | 89,941,194 |
+| Position 6 | 5 | 164,075,551 |
+
+Currently verified only to depth 3-4, on five of the six: ray-walking sliding
+attacks are far too slow for the full run. Deepen once magics land, and keep the
+deep run behind `#[ignore]` so the fast suite stays fast.
+
+## Roadmap
+
+Strict dependency order. Nothing here can be skipped or reordered:
+
+    bitboards -> attacks -> movegen -> perft -> UCI -> search -> eval -> NNUE
+
+A movegen bug that survives into search presents as a search bug and costs days.
+Perft is the gate.
+
+| # | Milestone | Gate | Status |
+| --- | --- | --- | --- |
+| 1 | Bitboards, FEN, position | FEN round-trips, invariants hold | done |
+| 2 | Magic bitboards | matches the ray-walking reference | next |
+| 3 | Legal movegen, make/unmake | all six perft positions, full depth | partial |
+| 4 | UCI | loads and plays in a GUI | done (random mover) |
+| 5 | Negamax + alpha-beta + ID | beats a random mover 100/100 | |
+| 6 | Quiescence | SPRT pass | |
+| 7 | Zobrist + TT | SPRT pass | |
+| 8 | Move ordering + SEE | SPRT pass, node count drops sharply | |
+| 9 | SPRT pipeline | gives a verdict on a known-good change | |
+| 10 | PVS, null move, LMR, futility | SPRT each independently | |
+| 11 | Handcrafted eval | SPRT each term | |
+| 12 | Datagen | 100M positions, FENs verify | |
+| 13 | First net | clean loss curve | |
+| 14 | NNUE inference | incremental == refresh, SPRT pass | |
+
 ## Board representation
 
 - **Bitboards, little-endian rank-file (LERF) mapping.** `A1 = bit 0`,
@@ -84,6 +125,11 @@ walks the move tree calling it at every node.
 - Quiescence search extends the leaf with captures (and check evasions /
   promotions as decided later) to reach a quiet position before calling eval.
 
+- **Never panic to abort a search.** `panic = "abort"` is in the release profile,
+  so unwinding would kill the process rather than unwind the tree. Signal through
+  the `AtomicBool`, return a sentinel, and discard the incomplete iteration.
+- Poll the clock every 2048 nodes. Checking every node costs measurably.
+
 ## Types
 
 - **Newtype wrappers, not bare integers.** `Square`, `Move`, `Bitboard` (and
@@ -106,6 +152,38 @@ walks the move tree calling it at every node.
   `Move` field extraction).
 - Do **not** scatter `#[inline(always)]`. Reserve it for a measured win, with a
   comment noting the benchmark that justified it.
+
+## Testing discipline
+
+**No search or evaluation change merges without a passing SPRT.** From milestone
+5 onward, intuition about our own changes stops being reliable: some heuristics
+gain 20 Elo and some lose 5, and reading the code does not tell you which.
+
+    fastchess -engine cmd=./target/release/newchessbot name=new \
+              -engine cmd=./baseline name=base \
+              -each tc=8+0.08 -rounds 50000 -concurrency 15 \
+              -openings file=UHO_Lichess_4852_v1.epd format=epd order=random \
+              -sprt elo0=0 elo1=5 alpha=0.05 beta=0.05
+
+Add heuristics one at a time, each behind its own run. SPRT stops as soon as the
+evidence is conclusive, so bad changes are rejected in a few hundred games.
+
+## NNUE
+
+- Quantization constants are a contract with the trainer: `QA = 255`, `QB = 64`,
+  `SCALE = 400`, and the hidden size must match the `bullet` schedule exactly. A
+  mismatch shows up as evals that are systematically compressed or exploded, not
+  as a training failure.
+- Feature ordering is part of that contract too: accumulators are concatenated
+  side-to-move first, and that is what tells the network whose turn it is.
+- Incremental accumulator updates must be bit-identical to a full refresh, tested
+  over thousands of random move sequences. Same class of bug as mailbox/bitboard
+  drift, and it gets the same treatment.
+- Every SIMD path keeps its scalar twin, plus a test asserting the two agree bit
+  for bit.
+- **Generate our own training data.** Training on networks or output produced by
+  another engine raises derived-work questions and is barred by many rating
+  lists.
 
 ## Profiles
 
