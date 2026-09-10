@@ -3,9 +3,9 @@
 //! Little-endian rank-file: bit 0 is A1, bit 63 is H8. North is `<< 8`, east is
 //! `<< 1`.
 //!
-//! Sliding attacks are computed by walking rays at runtime. That is correct but
-//! slow; magic bitboards or PEXT replace this once search exists to benchmark
-//! against.
+//! The `slow_*` sliding attacks here walk rays one square at a time. They are
+//! the obviously correct reference, kept permanently: `crate::magic` provides
+//! the fast lookups and is tested against these.
 
 use core::fmt;
 use core::ops::{
@@ -345,18 +345,18 @@ fn ray_attacks(sq: Square, occupied: Bitboard, dirs: &[(i8, i8); 4]) -> Bitboard
 }
 
 #[inline]
-pub fn rook_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
+pub fn slow_rook_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
     ray_attacks(sq, occupied, &ROOK_DIRS)
 }
 
 #[inline]
-pub fn bishop_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
+pub fn slow_bishop_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
     ray_attacks(sq, occupied, &BISHOP_DIRS)
 }
 
 #[inline]
-pub fn queen_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
-    rook_attacks(sq, occupied) | bishop_attacks(sq, occupied)
+pub fn slow_queen_attacks(sq: Square, occupied: Bitboard) -> Bitboard {
+    slow_rook_attacks(sq, occupied) | slow_bishop_attacks(sq, occupied)
 }
 
 #[cfg(test)]
@@ -379,7 +379,7 @@ mod tests {
     #[test]
     fn rook_stops_at_blocker() {
         let occ = Square::new(0, 3).bb();
-        let attacks = rook_attacks(Square::A1, occ);
+        let attacks = slow_rook_attacks(Square::A1, occ);
         assert!(attacks.contains(Square::new(0, 3)));
         assert!(!attacks.contains(Square::new(0, 4)));
         assert!(attacks.contains(Square::H1));

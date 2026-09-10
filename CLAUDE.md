@@ -11,7 +11,8 @@ The engine is a library (`src/lib.rs`); the binary is only the stdin loop.
 | Module | Holds |
 | --- | --- |
 | `types` | `Square`, `Move`, `Color`, `PieceType`, `Piece`, `CastlingRights` |
-| `bitboard` | `Bitboard`, jump-piece tables, sliding attacks |
+| `bitboard` | `Bitboard`, jump-piece tables, slow reference sliders |
+| `magic` | magic bitboards, the offline constant search |
 | `board` | `Position` (bitboards + mailbox), FEN I/O, `make_move` |
 | `movegen` | legal move generation, `perft` |
 | `rng` | xorshift64\* PRNG |
@@ -32,7 +33,7 @@ make/unmake).
 the bitboards agree. `movegen::tests::make_move_preserves_the_dual_representation`
 walks the move tree calling it at every node.
 
-Full-depth perft targets. All six are required before milestone 3 closes:
+Full-depth perft targets, all six verified:
 
 | Position | Depth | Nodes |
 | --- | --- | --- |
@@ -43,9 +44,13 @@ Full-depth perft targets. All six are required before milestone 3 closes:
 | Position 5 | 5 | 89,941,194 |
 | Position 6 | 5 | 164,075,551 |
 
-Currently verified only to depth 3-4, on five of the six: ray-walking sliding
-attacks are far too slow for the full run. Deepen once magics land, and keep the
-deep run behind `#[ignore]` so the fast suite stays fast.
+All six pass at full depth as of magics landing: ~1.45 billion nodes in about 90
+seconds, 10-23 Mnps. That is `movegen::tests::perft_full_depth`, kept behind
+`#[ignore]` so the fast suite stays fast:
+
+    cargo test --release -- --ignored --nocapture
+
+The default suite covers all six at depth 3-4 and runs in well under a second.
 
 ## Roadmap
 
@@ -59,10 +64,10 @@ Perft is the gate.
 | # | Milestone | Gate | Status |
 | --- | --- | --- | --- |
 | 1 | Bitboards, FEN, position | FEN round-trips, invariants hold | done |
-| 2 | Magic bitboards | matches the ray-walking reference | next |
-| 3 | Legal movegen, make/unmake | all six perft positions, full depth | partial |
+| 2 | Magic bitboards | matches the ray-walking reference | done |
+| 3 | Legal movegen, make/unmake | all six perft positions, full depth | done |
 | 4 | UCI | loads and plays in a GUI | done (random mover) |
-| 5 | Negamax + alpha-beta + ID | beats a random mover 100/100 | |
+| 5 | Negamax + alpha-beta + ID | beats a random mover 100/100 | next |
 | 6 | Quiescence | SPRT pass | |
 | 7 | Zobrist + TT | SPRT pass | |
 | 8 | Move ordering + SEE | SPRT pass, node count drops sharply | |

@@ -10,11 +10,9 @@
 
 use arrayvec::ArrayVec;
 
-use crate::bitboard::{
-    bishop_attacks, king_attacks, knight_attacks, pawn_attacks, queen_attacks, rook_attacks,
-    Bitboard,
-};
+use crate::bitboard::{king_attacks, knight_attacks, pawn_attacks, Bitboard};
 use crate::board::Position;
+use crate::magic::{bishop_attacks, queen_attacks, rook_attacks};
 use crate::types::{CastlingRights, Color, Move, PieceType, Square};
 
 /// Upper bound on legal moves in a position is 218; round up for headroom.
@@ -318,6 +316,54 @@ mod tests {
         ] {
             let pos: Position = fen.parse().expect("test fen is valid");
             walk_checking_invariants(&pos, 2);
+        }
+    }
+
+    #[test]
+    fn perft_position_six() {
+        check_perft(
+            "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
+            &[46, 2079, 89_890],
+        );
+    }
+
+    /// The milestone 3 gate: all six reference positions at full depth, roughly
+    /// 1.45 billion nodes. Ignored by default; run explicitly with
+    /// `cargo test --release -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "~1.45 billion nodes; run explicitly, in release"]
+    fn perft_full_depth() {
+        let cases: [(&str, u32, u64); 6] = [
+            (START_FEN, 6, 119_060_324),
+            (
+                "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+                5,
+                193_690_690,
+            ),
+            ("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1", 7, 178_633_661),
+            (
+                "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+                6,
+                706_045_033,
+            ),
+            (
+                "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+                5,
+                89_941_194,
+            ),
+            (
+                "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
+                5,
+                164_075_551,
+            ),
+        ];
+        for (fen, depth, want) in cases {
+            let pos: Position = fen.parse().expect("reference fen is valid");
+            let start = std::time::Instant::now();
+            let got = perft(&pos, depth);
+            let mnps = got as f64 / start.elapsed().as_secs_f64() / 1e6;
+            println!("perft({depth}) = {got:>12}  {mnps:6.1} Mnps  {fen}");
+            assert_eq!(got, want, "perft({depth}) for {fen}");
         }
     }
 }

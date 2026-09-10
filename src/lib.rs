@@ -5,6 +5,7 @@
 //! - [`types`] — newtypes for squares, pieces, moves, castling rights.
 //! - [`bitboard`] — the square-set type and attack generation.
 //! - [`board`] — [`board::Position`], FEN I/O, and move application.
+//! - [`magic`] — magic bitboards for sliding attacks.
 //! - [`movegen`] — legal move generation, plus `perft` for verifying it.
 //! - [`rng`] — a small self-contained PRNG.
 //! - [`uci`] — the protocol handler and its search worker thread.
@@ -17,6 +18,8 @@
 
 pub mod bitboard;
 pub mod board;
+pub mod magic;
+mod magic_constants;
 pub mod movegen;
 pub mod rng;
 pub mod types;
