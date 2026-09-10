@@ -15,11 +15,13 @@ The engine is a library (`src/lib.rs`); the binary is only the stdin loop.
 | `magic` | magic bitboards, the offline constant search |
 | `board` | `Position` (bitboards + mailbox), FEN I/O, `make_move` |
 | `movegen` | legal move generation, `perft` |
+| `eval` | material, tapered piece-square tables |
+| `search` | negamax, alpha-beta, iterative deepening, time management |
 | `rng` | xorshift64\* PRNG |
 | `uci` | protocol handler, search worker thread |
 
-Not yet written: search, evaluation, NNUE, transposition table. `go` answers
-with a random legal move.
+Not yet written: quiescence search, transposition table, NNUE. `go` runs
+alpha-beta to a time or depth limit.
 
 ## Correctness
 
@@ -67,8 +69,8 @@ Perft is the gate.
 | 2 | Magic bitboards | matches the ray-walking reference | done |
 | 3 | Legal movegen, make/unmake | all six perft positions, full depth | done |
 | 4 | UCI | loads and plays in a GUI | done (random mover) |
-| 5 | Negamax + alpha-beta + ID | beats a random mover 100/100 | next |
-| 6 | Quiescence | SPRT pass | |
+| 5 | Eval + negamax + alpha-beta + ID | beats a random mover 100/100 | done |
+| 6 | Quiescence | SPRT pass | next |
 | 7 | Zobrist + TT | SPRT pass | |
 | 8 | Move ordering + SEE | SPRT pass, node count drops sharply | |
 | 9 | SPRT pipeline | gives a verdict on a known-good change | |

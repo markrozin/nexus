@@ -15,18 +15,15 @@ use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::board::Position;
 use crate::movegen::generate_legal;
-use crate::rng::Rng;
-use crate::types::{Color, Move};
+use crate::search::{score_to_uci, IterationInfo, Search, SearchLimits};
+use crate::types::Color;
 
 pub const ENGINE_NAME: &str = "newchessbot";
 pub const ENGINE_AUTHOR: &str = "Mark Rozin";
-
-/// How often a waiting worker re-reads the stop flag.
-const POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 // ---------------------------------------------------------------------------
 // Output sinks
@@ -191,10 +188,6 @@ impl Limits {
         Some(Duration::from_millis(capped))
     }
 
-    /// Does this `go` need the worker to wait before answering?
-    fn is_timed(&self) -> bool {
-        self.infinite || self.movetime.is_some() || self.wtime.is_some() || self.btime.is_some()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +212,6 @@ pub struct Uci<W: Sink> {
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     options: Options,
-    rng: Rng,
 }
 
 impl Uci<StdoutSink> {
@@ -231,22 +223,12 @@ impl Uci<StdoutSink> {
 
 impl<W: Sink> Uci<W> {
     pub fn new(out: W) -> Self {
-        Self::with_rng(out, Rng::from_entropy())
-    }
-
-    /// Fixed-seed constructor, so a scripted session is reproducible.
-    pub fn with_seed(out: W, seed: u64) -> Self {
-        Self::with_rng(out, Rng::new(seed))
-    }
-
-    fn with_rng(out: W, rng: Rng) -> Self {
         Self {
             position: Position::startpos(),
             out,
             stop: Arc::new(AtomicBool::new(false)),
             worker: None,
             options: Options::default(),
-            rng,
         }
     }
 
@@ -406,11 +388,11 @@ impl<W: Sink> Uci<W> {
         let position = self.position;
         let stop = Arc::clone(&self.stop);
         let out = self.out.clone();
-        let rng = Rng::new(self.rng.next_u64());
+
 
         stop.store(false, Ordering::Relaxed);
         self.worker = Some(thread::spawn(move || {
-            run_search(position, limits, stop, out, rng);
+            run_search(position, limits, stop, out);
         }));
         Ok(())
     }
@@ -434,49 +416,52 @@ impl<W: Sink> Drop for Uci<W> {
 }
 
 // ---------------------------------------------------------------------------
-// Placeholder search
+// Search worker
 // ---------------------------------------------------------------------------
 
-/// Stand-in for the real search: picks a uniformly random legal move.
+/// Body of the search thread: run iterative deepening, stream an `info` line
+/// per completed iteration, then answer with `bestmove`.
 ///
-/// It still respects the stop flag and the time budget, so the threading and
-/// protocol plumbing is exercised for real before minimax replaces the move
-/// choice. No score is reported because there is no evaluation yet.
-fn run_search<W: Sink>(pos: Position, limits: Limits, stop: Arc<AtomicBool>, mut out: W, mut rng: Rng) {
-    let moves = generate_legal(&pos);
-    let best = match rng.choose(moves.len()) {
-        Some(i) => moves[i],
-        None => Move::NONE,
+/// The search watches the stop flag itself, so there is no polling loop here;
+/// `go infinite` simply has no depth or time limit to hit.
+fn run_search<W: Sink>(pos: Position, limits: Limits, stop: Arc<AtomicBool>, mut out: W) {
+    let search_limits = SearchLimits {
+        max_depth: limits.depth,
+        max_nodes: limits.nodes,
+        budget: limits.budget(pos.side_to_move()),
     };
 
-    if !best.is_none() {
-        let _ = writeln!(&mut out, "info depth 1 nodes {} pv {best}", moves.len());
-    }
+    let mut search = Search::new(stop);
+    let result = search.run(&pos, search_limits, &mut |info| {
+        report_iteration(&mut out, info);
+    });
 
-    if limits.is_timed() {
-        wait_out_the_clock(&limits, &stop, pos.side_to_move());
-    }
-
-    let _ = writeln!(&mut out, "bestmove {best}");
+    let _ = writeln!(&mut out, "bestmove {}", result.best_move);
     let _ = out.flush();
 }
 
-/// Block until the budget expires or `stop` is set, whichever comes first.
-fn wait_out_the_clock(limits: &Limits, stop: &AtomicBool, stm: Color) {
-    let deadline = limits.budget(stm).map(|budget| Instant::now() + budget);
-    loop {
-        // Relaxed is enough: this flag carries no data, and we only need to
-        // observe the write eventually.
-        if stop.load(Ordering::Relaxed) {
-            return;
+/// One `info` line. Written field by field rather than through a collected
+/// string, so reporting never allocates.
+fn report_iteration<W: Sink>(out: &mut W, info: IterationInfo<'_>) {
+    // Clamp to 1ms so a sub-millisecond iteration does not divide by zero.
+    let ms = (info.elapsed.as_millis() as u64).max(1);
+    let _ = write!(
+        out,
+        "info depth {} score {} nodes {} nps {} time {}",
+        info.depth,
+        score_to_uci(info.score),
+        info.nodes,
+        info.nodes * 1000 / ms,
+        info.elapsed.as_millis(),
+    );
+    if !info.pv.is_empty() {
+        let _ = write!(out, " pv");
+        for mv in info.pv {
+            let _ = write!(out, " {mv}");
         }
-        if let Some(deadline) = deadline {
-            if Instant::now() >= deadline {
-                return;
-            }
-        }
-        thread::sleep(POLL_INTERVAL);
     }
+    let _ = writeln!(out);
+    let _ = out.flush();
 }
 
 #[cfg(test)]
@@ -492,7 +477,7 @@ mod tests {
     fn session(script: &str) -> Vec<String> {
         let buf = SharedBuffer::new();
         {
-            let mut uci = Uci::with_seed(buf.clone(), 0x00C0_FFEE);
+            let mut uci = Uci::new(buf.clone());
             uci.run(Cursor::new(script)).expect("session runs cleanly");
         }
         buf.lines()
@@ -529,9 +514,9 @@ mod tests {
             "setoption name Threads value 4\n",
             "position startpos moves e2e4 e7e5\n",
             "isready\n",
-            "go depth 4\n",
+            "go depth 3\n",
             "stop\n",
-            "go movetime 5\n",
+            "go movetime 20\n",
             "stop\n",
             "go infinite\n",
             "stop\n",
@@ -541,20 +526,13 @@ mod tests {
         assert_eq!(lines[0], id_line());
         assert_eq!(lines[4], "uciok");
         assert_eq!(lines.iter().filter(|l| *l == "readyok").count(), 2);
-        // Every option we set is one we advertised, so nothing was rejected.
         assert!(
             !lines.iter().any(|l| l.contains("unknown option")),
             "{lines:#?}"
         );
 
-        let search_output: Vec<&String> = lines
-            .iter()
-            .filter(|l| l.starts_with("info depth") || l.starts_with("bestmove"))
-            .collect();
-        assert_eq!(search_output.len(), 6, "three searches, two lines each");
-
-        // The position after 1.e4 e5 has 29 legal moves; the `go` commands must
-        // have searched that position and not, say, the start position.
+        // The position after 1.e4 e5 has 29 legal moves; every answer must be
+        // one of them, which also proves the right position was searched.
         let mut pos = Position::startpos();
         for text in ["e2e4", "e7e5"] {
             pos = apply_uci_move(&pos, text).expect("scripted moves are legal");
@@ -562,15 +540,52 @@ mod tests {
         let legal: Vec<String> = generate_legal(&pos).iter().map(|mv| mv.to_string()).collect();
         assert_eq!(legal.len(), 29);
 
-        // Each search reports one info line naming its move, then that move.
-        for pair in search_output.chunks(2) {
-            let mv = pair[1]
-                .strip_prefix("bestmove ")
-                .expect("second line of each pair is the bestmove");
+        let bestmoves: Vec<&String> = lines.iter().filter(|l| l.starts_with("bestmove ")).collect();
+        assert_eq!(bestmoves.len(), 3, "one bestmove per go: {lines:#?}");
+        for line in &bestmoves {
+            let mv = line.strip_prefix("bestmove ").expect("prefix");
             assert!(legal.contains(&mv.to_string()), "{mv:?} is not legal here");
-            assert_eq!(pair[0], &format!("info depth 1 nodes 29 pv {mv}"));
         }
+
+        // Every info line carries the mandatory fields, and the move a search
+        // finally answers with has to be the one heading its last reported pv.
+        let mut pv_head: Option<String> = None;
+        let mut matched = 0;
+        for line in &lines {
+            if line.starts_with("info depth ") {
+                for field in ["score ", "nodes ", "nps ", "time "] {
+                    assert!(line.contains(field), "{line:?} is missing {field:?}");
+                }
+                if let Some(at) = line.find(" pv ") {
+                    pv_head = line[at + 4..].split_whitespace().next().map(str::to_owned);
+                }
+            } else if let Some(mv) = line.strip_prefix("bestmove ") {
+                if let Some(head) = pv_head.take() {
+                    assert_eq!(head, mv, "bestmove must head the last pv: {lines:#?}");
+                    matched += 1;
+                }
+            }
+        }
+        assert!(matched >= 2, "expected at least two searches to report a pv");
     }
+
+    #[test]
+    fn search_is_deterministic() {
+        // No RNG in the engine any more: the same script must produce the same
+        // moves. Only `bestmove` lines are compared, since node counts and
+        // timings legitimately vary with how far a timed search gets.
+        let script = "position startpos\ngo depth 3\nstop\ngo depth 3\nstop\nquit\n";
+        let best = |lines: Vec<String>| -> Vec<String> {
+            lines
+                .into_iter()
+                .filter(|l| l.starts_with("bestmove "))
+                .collect()
+        };
+        let first = best(session(script));
+        assert_eq!(first.len(), 2);
+        assert_eq!(first, best(session(script)));
+    }
+
 
     #[test]
     fn leading_byte_order_mark_is_ignored() {
@@ -581,14 +596,8 @@ mod tests {
     }
 
     #[test]
-    fn same_seed_replays_identically() {
-        let script = "position startpos\ngo depth 2\nstop\ngo depth 2\nstop\nquit\n";
-        assert_eq!(session(script), session(script));
-    }
-
-    #[test]
     fn setoption_stores_and_clamps() {
-        let mut uci = Uci::with_seed(SharedBuffer::new(), 1);
+        let mut uci = Uci::new(SharedBuffer::new());
         uci.handle("setoption name Hash value 256").unwrap();
         uci.handle("setoption name Threads value 8").unwrap();
         assert_eq!(
@@ -607,7 +616,7 @@ mod tests {
 
     #[test]
     fn position_accepts_startpos_and_fen() {
-        let mut uci = Uci::with_seed(SharedBuffer::new(), 1);
+        let mut uci = Uci::new(SharedBuffer::new());
 
         uci.handle("position startpos moves e2e4").unwrap();
         assert_eq!(uci.position().ep_square(), Square::from_uci("e3"));
@@ -624,7 +633,7 @@ mod tests {
     #[test]
     fn bad_input_is_reported_and_does_not_disturb_the_position() {
         let buf = SharedBuffer::new();
-        let mut uci = Uci::with_seed(buf.clone(), 1);
+        let mut uci = Uci::new(buf.clone());
         uci.handle("position startpos moves e2e4").unwrap();
         let before = uci.position().to_fen();
 
@@ -644,7 +653,7 @@ mod tests {
     #[test]
     fn go_infinite_answers_only_after_stop() {
         let buf = SharedBuffer::new();
-        let mut uci = Uci::with_seed(buf.clone(), 99);
+        let mut uci = Uci::new(buf.clone());
         uci.handle("go infinite").unwrap();
 
         // The worker is parked on the stop flag and cannot reach `bestmove`
@@ -658,7 +667,7 @@ mod tests {
     #[test]
     fn quit_returns_false_and_joins_the_worker() {
         let buf = SharedBuffer::new();
-        let mut uci = Uci::with_seed(buf.clone(), 3);
+        let mut uci = Uci::new(buf.clone());
         uci.handle("go infinite").unwrap();
         assert!(!uci.handle("quit").unwrap());
         assert!(buf.contents().contains("bestmove"));
@@ -667,7 +676,7 @@ mod tests {
     #[test]
     fn checkmate_reports_a_null_bestmove() {
         let buf = SharedBuffer::new();
-        let mut uci = Uci::with_seed(buf.clone(), 5);
+        let mut uci = Uci::new(buf.clone());
         // Fool's mate: White is mated and has nothing to play.
         uci.handle("position fen rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3")
             .unwrap();
@@ -698,6 +707,6 @@ mod tests {
         );
         // A bare `go` has nothing to wait for.
         assert_eq!(Limits::parse("").budget(Color::White), None);
-        assert!(!Limits::parse("depth 4").is_timed());
+        assert!(Limits::parse("depth 4").budget(Color::White).is_none());
     }
 }
