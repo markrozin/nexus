@@ -10,9 +10,9 @@ The engine is a library (`src/lib.rs`); the binary is only the stdin loop.
 
 | Module | Holds |
 | --- | --- |
-| `types` | `Square`, `Move`, `Color`, `PieceType`, `Piece`, `CastleRights` |
+| `types` | `Square`, `Move`, `Color`, `PieceType`, `Piece`, `CastlingRights` |
 | `bitboard` | `Bitboard`, jump-piece tables, sliding attacks |
-| `board` | `Position`, FEN I/O, `make_move` |
+| `board` | `Position` (bitboards + mailbox), FEN I/O, `make_move` |
 | `movegen` | legal move generation, `perft` |
 | `rng` | xorshift64\* PRNG |
 | `uci` | protocol handler, search worker thread |
@@ -28,6 +28,10 @@ or the attack code must keep those passing — they are the regression net for
 every optimization that follows (magic bitboards, pin-aware generation,
 make/unmake).
 
+`Position::assert_invariants` is the second net: it checks that the mailbox and
+the bitboards agree. `movegen::tests::make_move_preserves_the_dual_representation`
+walks the move tree calling it at every node.
+
 ## Board representation
 
 - **Bitboards, little-endian rank-file (LERF) mapping.** `A1 = bit 0`,
@@ -36,6 +40,17 @@ make/unmake).
   first rank and `file 0` the A-file.
 - Shift directions follow from the mapping: north `<< 8`, south `>> 8`,
   east `<< 1`, west `>> 1` (with file masking to stop wraparound).
+- **`Position` stores the board twice**: `[[Bitboard; 6]; 2]` indexed by color
+  then piece type (plus cached per-color and total occupancy) *and* an
+  `[Option<Piece>; 64]` mailbox. Bitboards answer "where are all the white
+  rooks"; the mailbox answers "what is on e4" without scanning six boards.
+- Every write to the board goes through `put`, `remove`, or `move_piece`. Do not
+  touch the bitboards or the mailbox directly — keeping the writes in one place
+  is what makes the invariant tractable.
+- The `Shl`/`Shr` impls on `Bitboard` do **not** mask files. Use `east`, `west`,
+  or `forward` where wraparound matters.
+- `Piece` is a 12-variant `#[repr(u8)]` enum with discriminant
+  `color * 6 + piece_type`, so it indexes a flat table directly.
 
 ## Scores
 

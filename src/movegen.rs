@@ -15,7 +15,7 @@ use crate::bitboard::{
     Bitboard,
 };
 use crate::board::Position;
-use crate::types::{CastleRights, Color, Move, PieceType, Square};
+use crate::types::{CastlingRights, Color, Move, PieceType, Square};
 
 /// Upper bound on legal moves in a position is 218; round up for headroom.
 pub const MAX_MOVES: usize = 256;
@@ -176,7 +176,7 @@ fn generate_castles(pos: &Position, us: Color, list: &mut MoveList) {
     let empty_between = |squares: &[Square]| squares.iter().all(|&s| !occupied.contains(s));
     let safe = |squares: &[Square]| squares.iter().all(|&s| !pos.is_attacked(s, them));
 
-    if pos.castling().contains(CastleRights::king_side(us))
+    if pos.castling().contains(CastlingRights::king_side(us))
         && rooks.contains(king_rook)
         && empty_between(&[file(5), file(6)])
         && safe(&[file(5), file(6)])
@@ -184,7 +184,7 @@ fn generate_castles(pos: &Position, us: Color, list: &mut MoveList) {
         list.push(Move::new(king_from, file(6), Move::KING_CASTLE));
     }
 
-    if pos.castling().contains(CastleRights::queen_side(us))
+    if pos.castling().contains(CastlingRights::queen_side(us))
         && rooks.contains(queen_rook)
         && empty_between(&[file(1), file(2), file(3)])
         && safe(&[file(2), file(3)])
@@ -290,5 +290,34 @@ mod tests {
         let uci: Vec<String> = generate_legal(&pos).iter().map(|m| m.to_string()).collect();
         assert!(!uci.contains(&"e1g1".to_string()));
         assert!(uci.contains(&"e1c1".to_string()));
+    }
+
+    /// Walk the tree, checking at every node that the mailbox and the bitboards
+    /// still agree. This is what proves `make_move` maintains both halves of
+    /// the representation, not just the half a given test happens to read.
+    fn walk_checking_invariants(pos: &Position, depth: u32) {
+        pos.assert_invariants();
+        if depth == 0 {
+            return;
+        }
+        for mv in generate_legal(pos) {
+            walk_checking_invariants(&pos.make_move(mv), depth - 1);
+        }
+    }
+
+    #[test]
+    fn make_move_preserves_the_dual_representation() {
+        walk_checking_invariants(&Position::startpos(), 3);
+        for fen in [
+            // Castling, captures, and a pinned position.
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            // Promotions on both sides.
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1",
+            // En passant and a rook endgame.
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        ] {
+            let pos: Position = fen.parse().expect("test fen is valid");
+            walk_checking_invariants(&pos, 2);
+        }
     }
 }
