@@ -8,7 +8,10 @@
 //! against.
 
 use core::fmt;
-use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not, Sub};
+use core::ops::{
+    BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not, Shl, ShlAssign, Shr,
+    ShrAssign, Sub,
+};
 
 use crate::types::{Color, Square};
 
@@ -88,6 +91,16 @@ impl Bitboard {
         Some(sq)
     }
 
+    /// The most significant set square, or `None` if empty.
+    #[inline]
+    pub const fn msb(self) -> Option<Square> {
+        if self.0 == 0 {
+            None
+        } else {
+            Some(Square::from_index(63 - self.0.leading_zeros() as u8))
+        }
+    }
+
     /// Shift every square one rank toward `color`'s promotion end.
     #[inline]
     pub const fn forward(self, color: Color) -> Self {
@@ -163,6 +176,39 @@ impl Sub for Bitboard {
     #[inline]
     fn sub(self, rhs: Self) -> Self {
         Self(self.0 & !rhs.0)
+    }
+}
+
+/// Shifts move squares along the board index: `<< 8` is one rank north, `>> 1`
+/// one file west. Neither masks files, so use [`Bitboard::east`] and
+/// [`Bitboard::west`] where wraparound matters.
+impl Shl<u32> for Bitboard {
+    type Output = Self;
+    #[inline]
+    fn shl(self, rhs: u32) -> Self {
+        Self(self.0 << rhs)
+    }
+}
+
+impl ShlAssign<u32> for Bitboard {
+    #[inline]
+    fn shl_assign(&mut self, rhs: u32) {
+        self.0 <<= rhs;
+    }
+}
+
+impl Shr<u32> for Bitboard {
+    type Output = Self;
+    #[inline]
+    fn shr(self, rhs: u32) -> Self {
+        Self(self.0 >> rhs)
+    }
+}
+
+impl ShrAssign<u32> for Bitboard {
+    #[inline]
+    fn shr_assign(&mut self, rhs: u32) {
+        self.0 >>= rhs;
     }
 }
 
@@ -344,5 +390,36 @@ mod tests {
         let bb = Square::A1.bb() | Square::H8.bb();
         let squares: Vec<_> = bb.collect();
         assert_eq!(squares, vec![Square::A1, Square::H8]);
+    }
+
+    #[test]
+    fn msb_and_lsb_find_the_extremes() {
+        let bb = Square::A1.bb() | Square::new(3, 3).bb() | Square::H8.bb();
+        assert_eq!(bb.lsb(), Some(Square::A1));
+        assert_eq!(bb.msb(), Some(Square::H8));
+        assert_eq!(bb.popcount(), 3);
+        assert_eq!(Bitboard::EMPTY.lsb(), None);
+        assert_eq!(Bitboard::EMPTY.msb(), None);
+        for sq in Square::ALL {
+            assert_eq!(sq.bb().lsb(), Some(sq));
+            assert_eq!(sq.bb().msb(), Some(sq));
+        }
+    }
+
+    #[test]
+    fn shifts_move_along_the_board_index() {
+        // One rank north is eight bits up.
+        assert_eq!(Square::A1.bb() << 8, Square::new(0, 1).bb());
+        assert_eq!(Square::H8.bb() >> 8, Square::new(7, 6).bb());
+        // Shifts deliberately do not mask files: a2 shifted west lands on h1,
+        // which is exactly what `west` exists to prevent.
+        assert_eq!(Square::new(0, 1).bb() >> 1, Square::H1.bb());
+        assert_eq!(Square::new(0, 1).bb().west(), Bitboard::EMPTY);
+
+        let mut bb = Square::A1.bb();
+        bb <<= 8;
+        assert_eq!(bb, Square::new(0, 1).bb());
+        bb >>= 8;
+        assert_eq!(bb, Square::A1.bb());
     }
 }

@@ -298,8 +298,8 @@ impl<W: Sink> Uci<W> {
             "stop" => self.stop_search(),
             "ponderhit" => {}
             "d" => {
-                let board = self.position.to_string();
-                for line in board.lines() {
+                let board = format!("{:?}", self.position);
+                for line in board.lines().filter(|l| !l.is_empty()) {
                     self.send(line)?;
                 }
             }

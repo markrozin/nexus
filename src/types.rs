@@ -1,11 +1,16 @@
 //! Core newtypes: [`Color`], [`PieceType`], [`Piece`], [`Square`], [`Move`],
-//! [`CastleRights`].
+//! [`CastlingRights`].
 //!
 //! Board mapping is little-endian rank-file: `A1 = 0`, `B1 = 1`, ..., `H8 = 63`.
 
 use core::fmt;
+use core::str::FromStr;
 
 use crate::bitboard::Bitboard;
+
+// ---------------------------------------------------------------------------
+// Color
+// ---------------------------------------------------------------------------
 
 /// Side to move / piece owner.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -16,6 +21,9 @@ pub enum Color {
 }
 
 impl Color {
+    pub const COUNT: usize = 2;
+    pub const ALL: [Color; Self::COUNT] = [Color::White, Color::Black];
+
     #[inline]
     pub const fn flip(self) -> Self {
         match self {
@@ -24,12 +32,22 @@ impl Color {
         }
     }
 
+    /// Array index for this color. Paired with [`Color::from_index`].
     #[inline]
     pub const fn index(self) -> usize {
         self as usize
     }
 
-    /// Direction a pawn of this color advances, as a square-index delta.
+    #[inline]
+    pub const fn from_index(i: usize) -> Option<Self> {
+        match i {
+            0 => Some(Color::White),
+            1 => Some(Color::Black),
+            _ => None,
+        }
+    }
+
+    /// Square-index delta for one pawn advance in this color's direction.
     #[inline]
     pub const fn pawn_push(self) -> i8 {
         match self {
@@ -37,7 +55,20 @@ impl Color {
             Color::Black => -8,
         }
     }
+
+    /// FEN side-to-move character.
+    #[inline]
+    pub const fn to_char(self) -> char {
+        match self {
+            Color::White => 'w',
+            Color::Black => 'b',
+        }
+    }
 }
+
+// ---------------------------------------------------------------------------
+// PieceType
+// ---------------------------------------------------------------------------
 
 /// Piece kind, ignoring color.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -53,7 +84,7 @@ pub enum PieceType {
 
 impl PieceType {
     pub const COUNT: usize = 6;
-    pub const ALL: [PieceType; 6] = [
+    pub const ALL: [PieceType; Self::COUNT] = [
         PieceType::Pawn,
         PieceType::Knight,
         PieceType::Bishop,
@@ -67,7 +98,17 @@ impl PieceType {
         self as usize
     }
 
-    /// Lowercase FEN character for this kind.
+    #[inline]
+    pub const fn from_index(i: usize) -> Option<Self> {
+        if i < Self::COUNT {
+            Some(Self::ALL[i])
+        } else {
+            None
+        }
+    }
+
+    /// Lowercase FEN character.
+    #[inline]
     pub const fn to_char(self) -> char {
         match self {
             PieceType::Pawn => 'p',
@@ -92,23 +133,85 @@ impl PieceType {
     }
 }
 
-/// A colored piece.
+// ---------------------------------------------------------------------------
+// Piece
+// ---------------------------------------------------------------------------
+
+/// A colored piece. The discriminant is `color * 6 + piece_type`, so a `Piece`
+/// indexes a flat 12-entry table directly — the shape NNUE feature indexing
+/// will want.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct Piece {
-    pub color: Color,
-    pub kind: PieceType,
+#[repr(u8)]
+pub enum Piece {
+    WhitePawn = 0,
+    WhiteKnight = 1,
+    WhiteBishop = 2,
+    WhiteRook = 3,
+    WhiteQueen = 4,
+    WhiteKing = 5,
+    BlackPawn = 6,
+    BlackKnight = 7,
+    BlackBishop = 8,
+    BlackRook = 9,
+    BlackQueen = 10,
+    BlackKing = 11,
 }
 
 impl Piece {
+    pub const COUNT: usize = 12;
+    pub const ALL: [Piece; Self::COUNT] = [
+        Piece::WhitePawn,
+        Piece::WhiteKnight,
+        Piece::WhiteBishop,
+        Piece::WhiteRook,
+        Piece::WhiteQueen,
+        Piece::WhiteKing,
+        Piece::BlackPawn,
+        Piece::BlackKnight,
+        Piece::BlackBishop,
+        Piece::BlackRook,
+        Piece::BlackQueen,
+        Piece::BlackKing,
+    ];
+
     #[inline]
-    pub const fn new(color: Color, kind: PieceType) -> Self {
-        Self { color, kind }
+    pub const fn new(color: Color, piece_type: PieceType) -> Self {
+        Self::ALL[color.index() * PieceType::COUNT + piece_type.index()]
+    }
+
+    #[inline]
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    #[inline]
+    pub const fn from_index(i: usize) -> Option<Self> {
+        if i < Self::COUNT {
+            Some(Self::ALL[i])
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub const fn color(self) -> Color {
+        if self.index() < PieceType::COUNT {
+            Color::White
+        } else {
+            Color::Black
+        }
+    }
+
+    #[inline]
+    pub const fn piece_type(self) -> PieceType {
+        PieceType::ALL[self.index() % PieceType::COUNT]
     }
 
     /// FEN character: uppercase for white, lowercase for black.
+    #[inline]
     pub const fn to_char(self) -> char {
-        let c = self.kind.to_char();
-        match self.color {
+        let c = self.piece_type().to_char();
+        match self.color() {
             Color::White => c.to_ascii_uppercase(),
             Color::Black => c,
         }
@@ -121,10 +224,30 @@ impl Piece {
             Color::Black
         };
         match PieceType::from_char(c) {
-            Some(kind) => Some(Piece::new(color, kind)),
+            Some(piece_type) => Some(Piece::new(color, piece_type)),
             None => None,
         }
     }
+}
+
+impl fmt::Display for Piece {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_char())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Square
+// ---------------------------------------------------------------------------
+
+const fn all_squares() -> [Square; Square::COUNT] {
+    let mut squares = [Square(0); Square::COUNT];
+    let mut i = 0;
+    while i < Square::COUNT {
+        squares[i] = Square(i as u8);
+        i += 1;
+    }
+    squares
 }
 
 /// A board square. `A1 = 0`, `H8 = 63`.
@@ -135,8 +258,11 @@ pub struct Square(u8);
 impl Square {
     pub const COUNT: usize = 64;
 
-    // Only the squares the rules code names directly. Everything else is
-    // built with `Square::new` or parsed from text.
+    /// Every square, in index order (A1, B1, ..., H8).
+    pub const ALL: [Square; Self::COUNT] = all_squares();
+
+    // Only the squares the rules code names directly; everything else comes
+    // from `new`, `ALL`, or parsing.
     pub const A1: Self = Self(0);
     pub const C1: Self = Self(2);
     pub const D1: Self = Self(3);
@@ -156,11 +282,12 @@ impl Square {
     /// In debug builds, if `i >= 64`.
     #[inline]
     pub const fn from_index(i: u8) -> Self {
-        debug_assert!(i < 64);
+        debug_assert!(i < Self::COUNT as u8);
         Self(i)
     }
 
-    /// `file` and `rank` are both `0..8` (file 0 = A-file, rank 0 = first rank).
+    /// `file` and `rank` are both `0..8` (file 0 is the A-file, rank 0 is the
+    /// first rank).
     #[inline]
     pub const fn new(file: u8, rank: u8) -> Self {
         debug_assert!(file < 8 && rank < 8);
@@ -188,8 +315,8 @@ impl Square {
         Bitboard::from_bits(1u64 << self.0)
     }
 
-    /// Shift by a square-index delta, returning `None` if it leaves the board.
-    /// Callers must still guard against file wraparound themselves.
+    /// Shift by a square-index delta, `None` if it leaves the board. Callers
+    /// must still guard against file wraparound themselves.
     #[inline]
     pub const fn offset(self, delta: i8) -> Option<Self> {
         let i = self.0 as i16 + delta as i16;
@@ -200,18 +327,40 @@ impl Square {
         }
     }
 
-    /// Parse coordinate notation, e.g. `"e4"`.
+    /// Parse coordinate notation, e.g. `"e4"`. Convenience wrapper over
+    /// [`FromStr`] for callers that want an `Option`.
+    #[inline]
     pub fn from_uci(s: &str) -> Option<Self> {
-        let b = s.as_bytes();
-        if b.len() != 2 {
-            return None;
+        s.parse().ok()
+    }
+}
+
+/// The string was not a square in coordinate notation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ParseSquareError;
+
+impl fmt::Display for ParseSquareError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("expected a square in coordinate notation, e.g. \"e4\"")
+    }
+}
+
+impl std::error::Error for ParseSquareError {}
+
+impl FromStr for Square {
+    type Err = ParseSquareError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes = s.as_bytes();
+        if bytes.len() != 2 {
+            return Err(ParseSquareError);
         }
-        let file = b[0].wrapping_sub(b'a');
-        let rank = b[1].wrapping_sub(b'1');
+        let file = bytes[0].to_ascii_lowercase().wrapping_sub(b'a');
+        let rank = bytes[1].wrapping_sub(b'1');
         if file > 7 || rank > 7 {
-            return None;
+            return Err(ParseSquareError);
         }
-        Some(Self::new(file, rank))
+        Ok(Self::new(file, rank))
     }
 }
 
@@ -231,6 +380,10 @@ impl fmt::Debug for Square {
         write!(f, "{self}")
     }
 }
+
+// ---------------------------------------------------------------------------
+// Move
+// ---------------------------------------------------------------------------
 
 /// A move, packed as `from | to << 6 | flag << 12`.
 ///
@@ -347,12 +500,16 @@ impl fmt::Debug for Move {
     }
 }
 
-/// Castling availability, as a 4-bit mask.
+// ---------------------------------------------------------------------------
+// CastlingRights
+// ---------------------------------------------------------------------------
+
+/// Castling availability, as a 4-bit mask over a `u8`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(transparent)]
-pub struct CastleRights(u8);
+pub struct CastlingRights(u8);
 
-impl CastleRights {
+impl CastlingRights {
     pub const NONE: Self = Self(0);
     pub const WHITE_KING: Self = Self(0b0001);
     pub const WHITE_QUEEN: Self = Self(0b0010);
@@ -360,6 +517,25 @@ impl CastleRights {
     pub const BLACK_QUEEN: Self = Self(0b1000);
     pub const ALL: Self = Self(0b1111);
 
+    /// Bits outside the low nibble are not castling rights.
+    const MASK: u8 = 0b1111;
+
+    #[inline]
+    pub const fn from_bits(bits: u8) -> Self {
+        Self(bits & Self::MASK)
+    }
+
+    #[inline]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+
+    #[inline]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// True only if every right in `other` is present.
     #[inline]
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
@@ -400,20 +576,34 @@ impl CastleRights {
             Color::Black => Self(0b1100),
         }
     }
+
+    /// The `(right, character)` pairs in FEN order.
+    const FEN_ORDER: [(Self, char); 4] = [
+        (Self::WHITE_KING, 'K'),
+        (Self::WHITE_QUEEN, 'Q'),
+        (Self::BLACK_KING, 'k'),
+        (Self::BLACK_QUEEN, 'q'),
+    ];
+
+    pub const fn from_char(c: char) -> Option<Self> {
+        match c {
+            'K' => Some(Self::WHITE_KING),
+            'Q' => Some(Self::WHITE_QUEEN),
+            'k' => Some(Self::BLACK_KING),
+            'q' => Some(Self::BLACK_QUEEN),
+            _ => None,
+        }
+    }
 }
 
-impl fmt::Display for CastleRights {
+impl fmt::Display for CastlingRights {
+    /// The FEN castling field, `-` when no rights remain.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0 == 0 {
-            return write!(f, "-");
+        if self.is_empty() {
+            return f.write_str("-");
         }
-        for (bit, c) in [
-            (Self::WHITE_KING, 'K'),
-            (Self::WHITE_QUEEN, 'Q'),
-            (Self::BLACK_KING, 'k'),
-            (Self::BLACK_QUEEN, 'q'),
-        ] {
-            if self.contains(bit) {
+        for (right, c) in Self::FEN_ORDER {
+            if self.contains(right) {
                 write!(f, "{c}")?;
             }
         }
@@ -421,8 +611,105 @@ impl fmt::Display for CastleRights {
     }
 }
 
-impl fmt::Debug for CastleRights {
+impl fmt::Debug for CastlingRights {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn piece_index_round_trips_through_color_and_type() {
+        for (i, piece) in Piece::ALL.iter().enumerate() {
+            assert_eq!(piece.index(), i);
+            assert_eq!(Piece::from_index(i), Some(*piece));
+            assert_eq!(Piece::new(piece.color(), piece.piece_type()), *piece);
+            assert_eq!(Piece::from_char(piece.to_char()), Some(*piece));
+        }
+        assert_eq!(Piece::from_index(Piece::COUNT), None);
+        assert_eq!(Piece::WhiteKing.color(), Color::White);
+        assert_eq!(Piece::BlackPawn.color(), Color::Black);
+        assert_eq!(Piece::BlackRook.piece_type(), PieceType::Rook);
+    }
+
+    #[test]
+    fn color_and_piece_type_indices_round_trip() {
+        for (i, color) in Color::ALL.iter().enumerate() {
+            assert_eq!(color.index(), i);
+            assert_eq!(Color::from_index(i), Some(*color));
+        }
+        for (i, kind) in PieceType::ALL.iter().enumerate() {
+            assert_eq!(kind.index(), i);
+            assert_eq!(PieceType::from_index(i), Some(*kind));
+        }
+        assert_eq!(Color::from_index(2), None);
+        assert_eq!(PieceType::from_index(6), None);
+    }
+
+    #[test]
+    fn square_all_is_ordered_and_consistent() {
+        assert_eq!(Square::ALL.len(), 64);
+        for (i, sq) in Square::ALL.iter().enumerate() {
+            assert_eq!(sq.index(), i);
+            assert_eq!(Square::new(sq.file(), sq.rank()), *sq);
+            assert_eq!(sq.bb().bits(), 1u64 << i);
+            // Display and FromStr are inverses over the whole board.
+            assert_eq!(sq.to_string().parse::<Square>(), Ok(*sq));
+        }
+        assert_eq!(Square::ALL[0], Square::A1);
+        assert_eq!(Square::ALL[63], Square::H8);
+    }
+
+    #[test]
+    fn square_parsing_is_strict_but_case_insensitive() {
+        assert_eq!("e4".parse::<Square>(), Ok(Square::new(4, 3)));
+        assert_eq!("E4".parse::<Square>(), Ok(Square::new(4, 3)));
+        assert_eq!(Square::from_uci("a1"), Some(Square::A1));
+        for bad in ["", "e", "e44", "i4", "e9", "4e", " e4"] {
+            assert_eq!(bad.parse::<Square>(), Err(ParseSquareError), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn castling_rights_display_in_fen_order() {
+        assert_eq!(CastlingRights::ALL.to_string(), "KQkq");
+        assert_eq!(CastlingRights::NONE.to_string(), "-");
+        let mut rights = CastlingRights::NONE;
+        rights.add(CastlingRights::BLACK_QUEEN);
+        rights.add(CastlingRights::WHITE_KING);
+        assert_eq!(rights.to_string(), "Kq");
+        rights.remove(CastlingRights::WHITE_KING);
+        assert_eq!(rights.to_string(), "q");
+        assert!(!rights.contains(CastlingRights::WHITE_KING));
+        assert!(rights.contains(CastlingRights::BLACK_QUEEN));
+    }
+
+    #[test]
+    fn castling_rights_bits_are_masked() {
+        assert_eq!(CastlingRights::from_bits(0xff), CastlingRights::ALL);
+        assert_eq!(CastlingRights::ALL.bits(), 0b1111);
+        assert_eq!(
+            CastlingRights::both(Color::White),
+            CastlingRights::from_bits(0b0011)
+        );
+    }
+
+    #[test]
+    fn move_encoding_round_trips() {
+        let mv = Move::new(Square::E1, Square::G1, Move::KING_CASTLE);
+        assert_eq!(mv.from(), Square::E1);
+        assert_eq!(mv.to(), Square::G1);
+        assert!(mv.is_castle());
+        assert!(!mv.is_capture());
+        assert_eq!(mv.to_string(), "e1g1");
+
+        let promo = Move::new(Square::new(4, 6), Square::new(5, 7), Move::PROMO_CAP_Q);
+        assert!(promo.is_promotion() && promo.is_capture());
+        assert_eq!(promo.promotion(), Some(PieceType::Queen));
+        assert_eq!(promo.to_string(), "e7f8q");
+        assert_eq!(Move::NONE.to_string(), "0000");
     }
 }
