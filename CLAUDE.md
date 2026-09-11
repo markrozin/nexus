@@ -140,6 +140,31 @@ Perft is the gate.
   the `AtomicBool`, return a sentinel, and discard the incomplete iteration.
 - Poll the clock every 2048 nodes. Checking every node costs measurably.
 
+### The heuristic layer
+
+Reference values, researched rather than guessed. Each still needs its own SPRT
+here; these are starting points, not verdicts.
+
+- **LMR** reduces by `c + ln(depth) * ln(move_index) / d`, not a bare log
+  product. Ethereal uses `0.7844 + ln*ln/2.4696` for quiets, Obsidian
+  `0.99 + ln*ln/3.14`, Weiss separate constants for captures and quiets.
+  Applies from depth 3 and after the first few moves; re-search at full depth
+  when the reduced search beats alpha.
+- **Null move** reduction R of 3 to 4, optionally scaled by `depth/3`. Skip in
+  check, in PV nodes, with a null already on the branch, and with no non-pawn
+  material. A further guard worth testing: require static eval above beta.
+- **Reverse futility** returns early when `eval >= beta + margin * depth`, with
+  margin around 150. Skip in check and in PV nodes.
+- **Futility** applies at frontier nodes only; captures and checks are exempt.
+  The deep and extended variants are historical, and modern engines prefer
+  move-count pruning instead.
+- **Singular extensions** are worth roughly 10 to 36 Elo depending on engine,
+  well below their original billing.
+
+Move ordering note: searching SEE-losing captures *before* quiet moves rather
+than last is an established split, not an anomaly, and it is what measured
+better here. See `BAD_CAPTURE_BASE`.
+
 ## Types
 
 - **Newtype wrappers, not bare integers.** `Square`, `Move`, `Bitboard` (and
@@ -236,18 +261,78 @@ to the LLR, so a verdict costs a few hundred games no matter how large the true
 effect is. A +292 Elo change and a +10 Elo change both take roughly the same
 number of games to accept. Do not read a slow verdict as a weak result.
 
+### Background processes
+
+**Confirm a background task actually died.** A stray process skews every timing
+measurement taken afterwards, and it will not announce itself. One hung
+`python` invocation sat at 19% of a core for 22 hours and was present during
+every SPRT in this file. Match verdicts survived it, because it loads both
+engines equally and the baseline-vs-baseline control confirmed no bias, but
+every nps figure taken during that window is understated.
+
+    Get-Process | Where-Object { $_.StartTime -lt (Get-Date).AddHours(-1) }
+
+Two rules that would have prevented it:
+
+- Do not invoke a tool speculatively to see whether it exists. That hang came
+  from a `python ... || sed ...` fallback where the `sed` alone was the entire
+  fix.
+- Never report killing a process without checking it is gone. Reporting an
+  action not taken is worse than the hang.
+
+
+
 
 
 ## NNUE
 
-- Quantization constants are a contract with the trainer: `QA = 255`, `QB = 64`,
-  `SCALE = 400`, and the hidden size must match the `bullet` schedule exactly. A
-  mismatch shows up as evals that are systematically compressed or exploded, not
-  as a training failure.
-- Feature ordering is part of that contract too: accumulators are concatenated
-  side-to-move first, and that is what tells the network whose turn it is.
-- Incremental accumulator updates must be bit-identical to a full refresh, tested
-  over thousands of random move sequences. Same class of bug as mailbox/bitboard
+Researched against `bullet` and the literature, not assumed. Anything here that
+contradicts the original outline is a deliberate correction.
+
+### The contract with the trainer
+
+- `QA = 255`, `QB = 64`, `SCALE = 400`, confirmed by bullet `examples/simple.rs`.
+  A mismatch shows up as evals systematically compressed or exploded, not as a
+  training failure.
+- Accumulators concatenate side-to-move first. That ordering is what tells the
+  network whose turn it is.
+- SCReLU is the activation to use; it is dominant and produces the strongest
+  network of the three in common use.
+- bullet writes `quantised.bin` **little-endian, column-major**, weights shaped
+  `output_size x input_size`, padded to a multiple of 64 bytes. The loader has to
+  match that exactly.
+- bullet `simple.rs` runs a WDL scheduler constant of **0.75** where the original
+  outline says 0.3. Check which way round bullet defines it before trusting
+  either number.
+
+### Data
+
+- Bulletformat is still supported and is the recommended choice for small nets;
+  binpacks are for when loading becomes the bottleneck. Viriformat is what most
+  people generating their own data use.
+- There is a text intermediate, `<FEN> | <score> | <result>`, score and result
+  **white-relative**. Emitting that and converting avoids hand-writing binary
+  records, which is exactly where a perspective sign error would hide.
+- Filter for quiet positions properly. The outline says skip checks and
+  positions whose best move is a capture; measured work gives a sharper test:
+  no checks, `|static - qsearch| <= 60`, and `|static - negamax| <= 70`
+  centipawns. Deduplicate, or the net overfits.
+- Fixed nodes, not fixed depth, so data is hardware-independent. About 5k nodes
+  per position, 7 or 8 random opening plies, discard openings already lopsided.
+
+### Scale, honestly
+
+A first 768 -> Nx2 -> 1 net on self-generated data is worth somewhere around
++100 to +200 Elo over a handcrafted evaluation. That is the realistic target.
+Competitive engines are far past it: Viridithas currently runs 16 input buckets
+and 8 output buckets over 2048x2 -> 16 -> 32 -> 1, and top engines use
+accumulators of 1024 to 3072. The gap is architecture *and* data volume, and
+data volume is CPU-bound, not GPU-bound.
+
+### Verification
+
+- Incremental accumulator updates must be bit-identical to a full refresh over
+  thousands of random move sequences. Same class of bug as mailbox/bitboard
   drift, and it gets the same treatment.
 - Every SIMD path keeps its scalar twin, plus a test asserting the two agree bit
   for bit.
