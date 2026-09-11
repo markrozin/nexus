@@ -75,9 +75,9 @@ Perft is the gate.
 | 5 | Eval + negamax + alpha-beta + ID | beats a random mover 100/100 | done |
 | 6 | Quiescence | SPRT pass | done (+292 Elo) |
 | 7 | Zobrist + TT | SPRT pass | done (+28, +121 Elo) |
-| 8 | Move ordering + SEE | SPRT pass, node count drops sharply | next |
+| 8 | Move ordering + SEE | SPRT pass, node count drops sharply | done (+60 Elo, -43% nodes) |
 | 9 | SPRT pipeline | gives a verdict on a known-good change | done |
-| 10 | PVS, null move, LMR, futility | SPRT each independently | |
+| 10 | PVS, null move, LMR, futility | SPRT each independently | next |
 | 11 | Handcrafted eval | SPRT each term | |
 | 12 | Datagen | 100M positions, FENs verify | |
 | 13 | First net | clean loss curve | |
@@ -178,6 +178,19 @@ gain 20 Elo and some lose 5, and reading the code does not tell you which.
 Add heuristics one at a time, each behind its own run. SPRT stops as soon as the
 evidence is conclusive, so bad changes are rejected in a few hundred games.
 
+### Measure node counts before spending an SPRT
+
+A fixed-depth `go depth N` on one position takes about two minutes and reports
+nodes, nps and time. An SPRT takes twenty to forty-five. For anything that
+changes move ordering or pruning, check the node count first — it caught an
+ordering change that was 3x *worse* than the baseline, which would otherwise
+have cost most of an hour to learn.
+
+Compare wall-clock, not just nodes: SEE ordering cut nodes 43% but also cost 13%
+of nps, and only the product matters. Node count is a proxy; the SPRT is still
+the gate.
+
+
 ### Running it on this machine
 
 `fastchess` came from `winget install Disservin.FastChess` and lives at
@@ -216,6 +229,7 @@ W/L/D and pentanomial tallies if you lose the console output anyway.
 | Quiescence search (milestone 6) | H1 accepted | 354 | +292.3 +/- 36.2 |
 | Zobrist + repetition detection (milestone 7a) | H1 accepted | 1864 | +28.4 |
 | Transposition table (milestone 7b) | H1 accepted | 600 | +121.1 +/- 25.6 |
+| Move ordering: SEE, killers, history (milestone 8) | H1 accepted | 1084 | +60.2 +/- 18.0 |
 
 A note on pacing: with `elo0=0 elo1=5`, each game contributes a bounded amount
 to the LLR, so a verdict costs a few hundred games no matter how large the true

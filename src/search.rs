@@ -9,8 +9,8 @@
 //! needs an SPRT to justify it. The heuristic layer (PVS, null move, LMR,
 //! futility) does, and none of it is here yet.
 //!
-//! Not yet present, in the order they are coming: a transposition table (and
-//! with it repetition detection), and killer/history move ordering.
+//! Not yet present: killer and history ordering for quiet moves, and the
+//! heuristic pruning layer (PVS, null move, LMR, futility).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -21,8 +21,9 @@ use arrayvec::ArrayVec;
 use crate::board::Position;
 use crate::eval::{evaluate, params};
 use crate::movegen::{generate_legal, generate_tactical, MoveList};
+use crate::see::see;
 use crate::tt::{Bound, TranspositionTable};
-use crate::types::{Move, PieceType};
+use crate::types::{Color, Move, PieceType};
 
 /// Hard ceiling on search depth, and the size of every per-ply array.
 pub const MAX_PLY: usize = 128;
@@ -50,6 +51,10 @@ const MAX_GAME_PLIES: usize = 1024;
 /// Table size when a `Search` is built without one. UCI overrides it from the
 /// `Hash` option.
 const DEFAULT_TT_MB: usize = 1;
+
+/// Cap on a quiet-history entry. Keeps the gravity update bounded and keeps
+/// history well below the capture tiers in the ordering.
+const MAX_HISTORY: i32 = 16_384;
 
 /// How often to consult the clock. Checking every node is measurable.
 const CLOCK_CHECK_INTERVAL: u64 = 2048;
@@ -138,6 +143,15 @@ pub struct Search {
     /// How many leading `history` entries belong to the game rather than the
     /// search tree.
     game_plies: usize,
+    /// Two quiet moves per ply that most recently caused a beta cutoff there.
+    ///
+    /// A refutation that works in one line usually works in its siblings, and
+    /// this costs nothing to remember.
+    killers: [[Move; 2]; MAX_PLY],
+    /// `[color][from][to]`, flattened. How often a quiet move has caused a
+    /// cutoff anywhere in the search: the only signal available for ranking
+    /// quiet moves against each other.
+    quiet_history: Box<[i32]>,
     /// Cleared until the first iteration completes. Depth 1 is cheap and the
     /// engine must always answer with a move it actually searched, so the stop
     /// flag and the clock are not consulted until it is done.
@@ -164,6 +178,8 @@ impl Search {
             start: Instant::now(),
             history: Vec::with_capacity(MAX_PLY + MAX_GAME_PLIES),
             game_plies: 0,
+            killers: [[Move::NONE; 2]; MAX_PLY],
+            quiet_history: vec![0; Color::COUNT * 64 * 64].into_boxed_slice(),
             first_iteration_done: false,
             aborted: false,
         }
@@ -205,6 +221,34 @@ impl Search {
         self.nodes
     }
 
+    #[inline]
+    fn history_index(color: Color, mv: Move) -> usize {
+        (color.index() * 64 + mv.from().index()) * 64 + mv.to().index()
+    }
+
+    /// Reward a quiet move that caused a cutoff.
+    ///
+    /// The update has "gravity": the correction shrinks as the entry approaches
+    /// the cap, so values stay bounded without ever needing a rescaling pass,
+    /// and a move that stops working decays back on its own.
+    fn record_cutoff(&mut self, pos: &Position, mv: Move, ply: usize, depth: i32) {
+        if mv.is_capture() || mv.is_promotion() {
+            // Captures are ranked by the exchange, not by history.
+            return;
+        }
+
+        let slot = &mut self.killers[ply];
+        if slot[0] != mv {
+            slot[1] = slot[0];
+            slot[0] = mv;
+        }
+
+        // Deeper cutoffs are stronger evidence, so they move the value further.
+        let bonus = (depth * depth).clamp(-MAX_HISTORY, MAX_HISTORY);
+        let entry = &mut self.quiet_history[Self::history_index(pos.side_to_move(), mv)];
+        *entry += bonus - *entry * bonus.abs() / MAX_HISTORY;
+    }
+
     /// Iterative deepening: search depth 1, then 2, and so on until the budget
     /// runs out.
     ///
@@ -228,6 +272,12 @@ impl Search {
         self.deadline = limits.budget.map(|b| self.start + b);
         self.pv.lengths = [0; MAX_PLY];
         self.tt.new_generation();
+        self.killers = [[Move::NONE; 2]; MAX_PLY];
+        // Halve rather than clear: ordering from the previous move is still a
+        // better prior than nothing.
+        for entry in self.quiet_history.iter_mut() {
+            *entry /= 2;
+        }
 
         let root_moves = generate_legal(pos);
         let mut result = SearchResult {
@@ -339,7 +389,13 @@ impl Search {
         // Even when the stored entry could not cut this node off, the move it
         // found is the single best ordering hint available.
         let tt_move = tt_hit.map_or(Move::NONE, |hit| hit.mv);
-        order_moves(pos, &mut moves, tt_move);
+        order_moves(
+            pos,
+            &mut moves,
+            tt_move,
+            self.killers[ply],
+            &self.quiet_history,
+        );
 
         // On the path from here down, this position counts as seen.
         self.history.push(pos.zobrist());
@@ -364,6 +420,7 @@ impl Search {
                     alpha = score;
                     self.pv.update(ply, mv);
                     if alpha >= beta {
+                        self.record_cutoff(pos, mv, ply, depth);
                         break; // the opponent would never allow this line
                     }
                 }
@@ -427,7 +484,9 @@ impl Search {
         // An empty list here means "nothing to capture", not "no legal moves":
         // checkmate and stalemate are the caller's business, and a quiet
         // position correctly returns its stand-pat.
-        order_moves(pos, &mut moves, Move::NONE);
+        // Everything here is a capture or promotion, so killers and history
+        // never apply.
+        order_moves(pos, &mut moves, Move::NONE, [Move::NONE; 2], &self.quiet_history);
 
         let mut best = stand_pat;
         for mv in moves {
@@ -519,10 +578,20 @@ fn is_insufficient_material(pos: &Position) -> bool {
 /// This is only the cheap part — promotions, then captures by MVV-LVA (most
 /// valuable victim, least valuable attacker). Killers, history, and SEE arrive
 /// with milestone 8, and the transposition-table move with milestone 7.
-fn order_moves(pos: &Position, moves: &mut MoveList, tt_move: Move) {
+/// Order moves so the likely-best are searched first.
+///
+/// Alpha-beta prunes in proportion to how good this guess is: with perfect
+/// ordering the effective branching factor drops from about 35 to about 6.
+fn order_moves(
+    pos: &Position,
+    moves: &mut MoveList,
+    tt_move: Move,
+    killers: [Move; 2],
+    quiet_history: &[i32],
+) {
     let mut scored: ArrayVec<(i32, Move), { crate::movegen::MAX_MOVES }> = ArrayVec::new();
     for &mv in moves.iter() {
-        scored.push((move_score(pos, mv, tt_move), mv));
+        scored.push((move_score(pos, mv, tt_move, killers, quiet_history), mv));
     }
     // Unstable sort so nothing is allocated inside the search.
     scored.sort_unstable_by(|a, b| b.0.cmp(&a.0));
@@ -531,37 +600,74 @@ fn order_moves(pos: &Position, moves: &mut MoveList, tt_move: Move) {
     }
 }
 
-fn move_score(pos: &Position, mv: Move, tt_move: Move) -> i32 {
-    // Above everything: a move already proven best here outranks any capture.
+fn move_score(
+    pos: &Position,
+    mv: Move,
+    tt_move: Move,
+    killers: [Move; 2],
+    quiet_history: &[i32],
+) -> i32 {
+    /// A move already proven best here outranks everything else.
     const TT_BASE: i32 = 10_000_000;
-    const PROMOTION_BASE: i32 = 2_000_000;
-    const CAPTURE_BASE: i32 = 1_000_000;
+    /// Captures the exchange says win or break even.
+    const GOOD_CAPTURE_BASE: i32 = 8_000_000;
+    /// Quiet moves that refuted a sibling at this same ply.
+    const KILLER_FIRST: i32 = 7_000_000;
+    const KILLER_SECOND: i32 = 6_000_000;
+    /// Captures the exchange says lose material: after the winning ones and the
+    /// killers, but still ahead of the remaining quiet moves.
+    ///
+    /// Textbook ordering puts these dead last. Measured on this engine that
+    /// costs nodes, and it still does after killers and history were added, so
+    /// the usual explanation (that it needs ordered quiets) is not the whole
+    /// story. Depth 8 from the Ruy Lopez after 3...Nf6:
+    ///
+    /// ```text
+    ///   ahead of quiets   2,877,331 nodes   1604 ms
+    ///   dead last         3,274,924 nodes   1824 ms
+    ///   dead last, no killers/history      15,389,205 nodes
+    /// ```
+    ///
+    /// A losing capture is still a forcing move, and this history is shallow -
+    /// bonus only, no malus and no continuation tables. Worth retrying once
+    /// those exist.
+    const BAD_CAPTURE_BASE: i32 = 5_000_000;
 
     if mv == tt_move && !mv.is_none() {
         return TT_BASE;
     }
 
-    let mut score = 0;
-    if let Some(promoted) = mv.promotion() {
-        score += PROMOTION_BASE + params::MG_VALUE[promoted.index()];
+    if !mv.is_capture() && !mv.is_promotion() {
+        if mv == killers[0] {
+            return KILLER_FIRST;
+        }
+        if mv == killers[1] {
+            return KILLER_SECOND;
+        }
+        // Bounded by MAX_HISTORY, so quiet moves never reach a capture tier.
+        let index = (pos.side_to_move().index() * 64 + mv.from().index()) * 64 + mv.to().index();
+        return quiet_history[index];
     }
-    if mv.is_capture() {
-        let victim = if mv.is_en_passant() {
-            PieceType::Pawn
-        } else {
-            pos.piece_at(mv.to())
-                .map(|p| p.piece_type())
-                .unwrap_or(PieceType::Pawn)
-        };
-        let attacker = pos
-            .piece_at(mv.from())
-            .map(|p| p.piece_type())
-            .unwrap_or(PieceType::King);
-        // Victim dominates; the attacker only breaks ties, cheapest first.
-        score += CAPTURE_BASE + params::MG_VALUE[victim.index()] * 16
-            - params::MG_VALUE[attacker.index()];
+
+    let victim_value = if mv.is_en_passant() {
+        params::MG_VALUE[PieceType::Pawn.index()]
+    } else {
+        pos.piece_at(mv.to())
+            .map_or(0, |p| params::MG_VALUE[p.piece_type().index()])
+    };
+    let attacker_value = pos
+        .piece_at(mv.from())
+        .map_or(0, |p| params::MG_VALUE[p.piece_type().index()]);
+    // Most valuable victim, least valuable attacker. Only a tie-break now that
+    // SEE decides which side of the killers a capture lands on.
+    let mvv_lva = victim_value * 16 - attacker_value;
+
+    let exchange = see(pos, mv);
+    if exchange >= 0 {
+        GOOD_CAPTURE_BASE + exchange + mvv_lva
+    } else {
+        BAD_CAPTURE_BASE + exchange
     }
-    score
 }
 
 /// Split a score into the `cp` or `mate` form UCI expects.
@@ -948,11 +1054,110 @@ mod tests {
         }
     }
 
+    fn order(pos: &Position, search: &Search, tt_move: Move, ply: usize) -> Vec<String> {
+        let mut moves = generate_legal(pos);
+        order_moves(
+            pos,
+            &mut moves,
+            tt_move,
+            search.killers[ply],
+            &search.quiet_history,
+        );
+        moves.iter().map(|mv| mv.to_string()).collect()
+    }
+
+    #[test]
+    fn winning_captures_outrank_losing_ones() {
+        // Qxg4 wins a hanging queen; Qxd5 wins a pawn but hangs the queen to
+        // exd5. MVV-LVA rates Qxd5 highly because a pawn is still a victim;
+        // only SEE separates them.
+        let pos: Position = "4k3/8/4p3/3p4/6q1/8/8/3QK3 w - - 0 1".parse().unwrap();
+        let search = Search::new(Arc::new(AtomicBool::new(false)));
+        let ranked = order(&pos, &search, Move::NONE, 0);
+
+        let at = |uci: &str| ranked.iter().position(|m| m == uci).expect(uci);
+        assert_eq!(ranked[0], "d1g4", "the winning capture leads");
+        assert!(at("d1d5") > at("d1g4"), "losing capture must rank lower");
+        // But still ahead of the quiet moves: it is forcing, and the quiets are
+        // unordered until history has something to say. See `BAD_CAPTURE_BASE`.
+        assert!(at("d1d5") < at("e1f1"));
+    }
+
+    #[test]
+    fn a_killer_outranks_a_losing_capture() {
+        // Only capture available is Qxd5, which loses the queen. A quiet move
+        // that refuted a sibling at this ply should be tried before it.
+        let pos: Position = "4k3/8/4p3/3p4/8/8/8/3QK3 w - - 0 1".parse().unwrap();
+        let mut search = Search::new(Arc::new(AtomicBool::new(false)));
+
+        let before = order(&pos, &search, Move::NONE, 0);
+        assert_eq!(before[0], "d1d5", "with nothing learned, the capture leads");
+
+        let killer = generate_legal(&pos)
+            .iter()
+            .copied()
+            .find(|mv| mv.to_string() == "e1f1")
+            .unwrap();
+        search.record_cutoff(&pos, killer, 0, 5);
+
+        let after = order(&pos, &search, Move::NONE, 0);
+        assert_eq!(after[0], "e1f1", "the killer should now lead");
+    }
+
+    #[test]
+    fn history_ranks_quiet_moves_against_each_other() {
+        let pos: Position = "4k3/8/8/8/8/8/8/R3K2R w KQ - 0 1".parse().unwrap();
+        let mut search = Search::new(Arc::new(AtomicBool::new(false)));
+        let pick = |uci: &str| {
+            generate_legal(&pos)
+                .iter()
+                .copied()
+                .find(|mv| mv.to_string() == uci)
+                .expect(uci)
+        };
+
+        // Reward one quiet move at a shallow depth and another at a deeper one:
+        // deeper cutoffs are stronger evidence and must rank higher.
+        search.record_cutoff(&pos, pick("a1b1"), 4, 2);
+        search.record_cutoff(&pos, pick("h1g1"), 4, 8);
+        // Killers live at the ply they were recorded, so order from a ply with
+        // none to isolate history.
+        let ranked = order(&pos, &search, Move::NONE, 0);
+        let at = |uci: &str| ranked.iter().position(|m| m == uci).expect(uci);
+        assert!(at("h1g1") < at("a1b1"), "deeper cutoff should rank first");
+        assert!(at("a1b1") < at("e1d1"), "any history beats none");
+    }
+
+    #[test]
+    fn winning_captures_still_lead() {
+        // Same shape, pawn undefended: now the capture is free and goes first.
+        let pos: Position = "4k3/8/8/3p4/8/8/8/3QK3 w - - 0 1".parse().unwrap();
+        let mut moves = generate_legal(&pos);
+        let scratch = Search::new(Arc::new(AtomicBool::new(false)));
+        order_moves(&pos, &mut moves, Move::NONE, [Move::NONE; 2], &scratch.quiet_history);
+        assert_eq!(moves[0].to_string(), "d1d5");
+    }
+
+    #[test]
+    fn the_transposition_move_outranks_even_a_winning_capture() {
+        let pos: Position = "4k3/8/8/3p4/8/8/8/3QK3 w - - 0 1".parse().unwrap();
+        let hint = generate_legal(&pos)
+            .iter()
+            .copied()
+            .find(|mv| mv.to_string() == "e1f1")
+            .unwrap();
+        let mut moves = generate_legal(&pos);
+        let scratch = Search::new(Arc::new(AtomicBool::new(false)));
+        order_moves(&pos, &mut moves, hint, [Move::NONE; 2], &scratch.quiet_history);
+        assert_eq!(moves[0], hint);
+    }
+
     #[test]
     fn ordering_puts_captures_and_promotions_first() {
         let pos: Position = "4k3/8/8/3q4/8/8/8/3RK3 w - - 0 1".parse().unwrap();
         let mut moves = generate_legal(&pos);
-        order_moves(&pos, &mut moves, Move::NONE);
+        let scratch = Search::new(Arc::new(AtomicBool::new(false)));
+        order_moves(&pos, &mut moves, Move::NONE, [Move::NONE; 2], &scratch.quiet_history);
         assert_eq!(moves[0].to_string(), "d1d5", "queen capture leads");
         assert_eq!(moves.len(), generate_legal(&pos).len(), "no moves lost");
     }
