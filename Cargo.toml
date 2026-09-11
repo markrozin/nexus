@@ -32,8 +32,8 @@ harness = false
 
 [features]
 default = []
-# Data generation for NNUE training. Pulls in rayon; not used by the engine at runtime.
-datagen = ["dep:rayon"]
+# Self-play data generation for NNUE training. Not part of any engine build.
+datagen = []
 # Offline magic-constant search. Not part of any engine build.
 magicgen = []
 # Opening-book generation for match testing. Not part of any engine build.
@@ -42,9 +42,6 @@ bookgen = []
 [dependencies]
 # Stack-allocated move lists in the hot path; no heap allocation inside search.
 arrayvec = "0.7"
-
-# Parallelism for datagen only. Never referenced from the search hot path.
-rayon = { version = "1", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -72,3 +69,8 @@ required-features = ["magicgen"]
 name = "bookgen"
 path = "src/bin/bookgen.rs"
 required-features = ["bookgen"]
+
+[[bin]]
+name = "datagen"
+path = "src/bin/datagen.rs"
+required-features = ["datagen"]

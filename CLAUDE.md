@@ -77,7 +77,7 @@ Perft is the gate.
 | 7 | Zobrist + TT | SPRT pass | done (+28, +121 Elo) |
 | 8 | Move ordering + SEE | SPRT pass, node count drops sharply | done (+60 Elo, -43% nodes) |
 | 9 | SPRT pipeline | gives a verdict on a known-good change | done |
-| 10 | PVS, null move, LMR, futility | SPRT each independently | next |
+| 10 | PVS, null move, LMR, futility | SPRT each independently | PVS + null move done (+166 Elo) |
 | 11 | Handcrafted eval | SPRT each term | |
 | 12 | Datagen | 100M positions, FENs verify | |
 | 13 | First net | clean loss curve | |
@@ -240,8 +240,15 @@ itself first; it should land near zero. A 12-game control read -232 Elo and an
 80-game control of the same two binaries read -4.3 +/- 49, which is the whole
 lesson about small samples in one line.
 
-Use `-concurrency 3` on this 8-core box: each game is two engine processes, and
-oversubscription shows up as timing noise.
+Use `-concurrency 2`. This box reports 8 processors but has **4 physical
+cores** (i5-10210U, a 15W mobile part); `nproc` counts threads. Each game is two
+engine processes, so concurrency 2 fills the physical cores exactly and
+concurrency 3 oversubscribes them by half.
+
+Earlier runs in the table below used concurrency 3. The verdicts stand -- the
+load is symmetric and the baseline-vs-baseline control confirmed no bias -- but
+the extra variance inflates the games needed per verdict, which is part of why
+the PVS run burned 5000 games without resolving.
 
 Always pass `-log file=<abs path> level=warn`, and never pipe the run through
 `tail`: the SPRT verdict line prints before the per-player summary, so a tail
@@ -255,11 +262,26 @@ W/L/D and pentanomial tallies if you lose the console output anyway.
 | Zobrist + repetition detection (milestone 7a) | H1 accepted | 1864 | +28.4 |
 | Transposition table (milestone 7b) | H1 accepted | 600 | +121.1 +/- 25.6 |
 | Move ordering: SEE, killers, history (milestone 8) | H1 accepted | 1084 | +60.2 +/- 18.0 |
+| PVS alone (milestone 10) | **no verdict** | 5000 | +6.5 +/- 7.5 |
+| PVS + null move (milestone 10) | H1 accepted | 468 | +166.0 +/- 29.1 |
 
-A note on pacing: with `elo0=0 elo1=5`, each game contributes a bounded amount
-to the LLR, so a verdict costs a few hundred games no matter how large the true
-effect is. A +292 Elo change and a +10 Elo change both take roughly the same
-number of games to accept. Do not read a slow verdict as a weak result.
+**A slow verdict means a small effect.** The number of games SPRT needs falls as
+the true gain grows, because the LLR drifts in proportion to how far the effect
+sits from the midpoint of the two hypotheses. Our own runs are monotonic in it:
+
+    +292 Elo    354 games
+    +121 Elo    600 games
+    +60  Elo   1084 games
+    +28  Elo   1864 games
+    +13  Elo   4000+ games
+
+So budget by expected size. A change worth a few Elo costs hours at
+`elo0=0 elo1=5`; if that is too slow, widen the bounds or run a fixed-game A/B
+and accept a point estimate instead of a decision.
+
+(An earlier version of this file claimed the opposite -- that effect size did
+not change the game count. That was wrong, and was a rationalisation of one run
+rather than a reading of the data.)
 
 ### Background processes
 
@@ -340,6 +362,25 @@ data volume is CPU-bound, not GPU-bound.
   another engine raises derived-work questions and is barred by many rating
   lists.
 
+## Hardware
+
+    Intel Core i5-10210U   4 physical cores / 8 threads, 15W mobile
+    Intel UHD Graphics     no CUDA, ROCm or Metal
+    15.8 GB RAM
+
+Consequences worth knowing before planning any long run:
+
+- `nproc` reports 8. That is threads. Size match concurrency off **4**.
+- Sustained load thermally throttles a U-series part, so long runs are slower
+  per unit than short ones. Do not extrapolate a 2-minute benchmark to a
+  20-hour job.
+- **`bullet` cannot train here.** It needs CUDA, ROCm or Metal. Training a first
+  768 net is under an hour on almost any rented GPU, so rent for that step.
+- Datagen is the job this machine is worst at: 100M positions at 5k nodes is
+  roughly 5e11 nodes, which is **15-25 hours here**, against under two on a
+  rented 32-64 core box. Datagen is embarrassingly parallel, so the CPU rental
+  buys more than the GPU rental does.
+
 ## Profiles
 
 - `cargo build --release` — `lto = "fat"`, `codegen-units = 1`,
@@ -349,16 +390,23 @@ data volume is CPU-bound, not GPU-bound.
 
 ## Features
 
-- `datagen` — enables rayon for parallel self-play data generation. Off by
-  default. Nothing behind this feature may be referenced from the search hot
-  path.
+- `datagen` — self-play data generation for NNUE training. Off by default.
+  Nothing behind this feature may be referenced from the search hot path.
+- `magicgen` — the offline magic-constant search. Run once; the output is
+  committed as `src/magic_constants.rs`.
+- `bookgen` — opening-book generation for SPRT testing.
 
 ## Dependencies
 
-Keep them minimal. Current set: `arrayvec` (move lists), `rayon` (datagen only,
-feature-gated), `criterion` (dev-only, benchmarks). No `serde`. No `rand` in the
-hot path — if randomness is needed there, use a small explicit PRNG (e.g. xorshift)
-written in-tree.
+Keep them minimal. Current set: `arrayvec` (move lists) and `criterion`
+(dev-only, benchmarks). That is the whole list.
+
+`rayon` was dropped: datagen parallelises with `std::thread::scope`, one
+independent worker per thread with nothing shared, so the dependency bought
+nothing. An unused dependency is worse than no dependency.
+
+No `serde`. No `rand` in the hot path — if randomness is needed there, use a
+small explicit PRNG (e.g. xorshift) written in-tree.
 
 ## Benchmarks
 

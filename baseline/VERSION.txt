@@ -1,2 +1,2 @@
-848aec1
-m8 pending commit: + SEE/killer/history ordering (+60 Elo over m7)
+92afa04
+m10a pending commit: + PVS and null move pruning (+166 Elo over m8)
