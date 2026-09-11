@@ -1,2 +1,2 @@
-e56d7a8
-m7a pending commit: + zobrist and repetition detection (+28 Elo over m6)
+d0d24c7
+m7 pending commit: + transposition table (+121 Elo over m7a)

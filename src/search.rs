@@ -21,6 +21,7 @@ use arrayvec::ArrayVec;
 use crate::board::Position;
 use crate::eval::{evaluate, params};
 use crate::movegen::{generate_legal, generate_tactical, MoveList};
+use crate::tt::{Bound, TranspositionTable};
 use crate::types::{Move, PieceType};
 
 /// Hard ceiling on search depth, and the size of every per-ply array.
@@ -45,6 +46,10 @@ pub const DRAW: i32 = 0;
 /// drop their oldest entries, which can only lose a repetition detection, never
 /// invent one.
 const MAX_GAME_PLIES: usize = 1024;
+
+/// Table size when a `Search` is built without one. UCI overrides it from the
+/// `Hash` option.
+const DEFAULT_TT_MB: usize = 1;
 
 /// How often to consult the clock. Checking every node is measurable.
 const CLOCK_CHECK_INTERVAL: u64 = 2048;
@@ -126,6 +131,7 @@ pub struct Search {
     limits: SearchLimits,
     deadline: Option<Instant>,
     start: Instant,
+    tt: Arc<TranspositionTable>,
     /// Zobrist keys of the game so far, then of the current search path.
     /// Reserved once; `push` inside the search never reallocates.
     history: Vec<u64>,
@@ -143,7 +149,13 @@ pub struct Search {
 
 impl Search {
     pub fn new(stop: Arc<AtomicBool>) -> Self {
+        Self::with_table(stop, Arc::new(TranspositionTable::new(DEFAULT_TT_MB)))
+    }
+
+    /// Share a table across searches, which is how it survives between moves.
+    pub fn with_table(stop: Arc<AtomicBool>, tt: Arc<TranspositionTable>) -> Self {
         Self {
+            tt,
             pv: PvTable::new(),
             nodes: 0,
             stop,
@@ -215,6 +227,7 @@ impl Search {
         self.start = Instant::now();
         self.deadline = limits.budget.map(|b| self.start + b);
         self.pv.lengths = [0; MAX_PLY];
+        self.tt.new_generation();
 
         let root_moves = generate_legal(pos);
         let mut result = SearchResult {
@@ -294,6 +307,25 @@ impl Search {
             return self.quiescence(pos, alpha, beta, ply);
         }
 
+        let tt_hit = self.tt.probe(pos.zobrist(), ply);
+        if ply > 0 {
+            if let Some(hit) = tt_hit {
+                // Only trust a result searched at least as deeply as this one,
+                // and only when its bound falls on the useful side of the
+                // current window.
+                if hit.depth as i32 >= depth
+                    && match hit.bound {
+                        Bound::Exact => true,
+                        Bound::Lower => hit.score >= beta,
+                        Bound::Upper => hit.score <= alpha,
+                        Bound::None => false,
+                    }
+                {
+                    return hit.score;
+                }
+            }
+        }
+
         let mut moves = generate_legal(pos);
         if moves.is_empty() {
             return if pos.in_check(pos.side_to_move()) {
@@ -304,14 +336,19 @@ impl Search {
                 DRAW
             };
         }
-        order_moves(pos, &mut moves);
+        // Even when the stored entry could not cut this node off, the move it
+        // found is the single best ordering hint available.
+        let tt_move = tt_hit.map_or(Move::NONE, |hit| hit.mv);
+        order_moves(pos, &mut moves, tt_move);
 
         // On the path from here down, this position counts as seen.
         self.history.push(pos.zobrist());
 
         // Fail-soft: return the true best even when it falls outside the
         // window, which gives the transposition table a tighter bound later.
+        let original_alpha = alpha;
         let mut best = -INFINITY;
+        let mut best_move = Move::NONE;
         for mv in moves {
             self.nodes += 1;
             let child = pos.make_move(mv);
@@ -322,6 +359,7 @@ impl Search {
 
             if score > best {
                 best = score;
+                best_move = mv;
                 if score > alpha {
                     alpha = score;
                     self.pv.update(ply, mv);
@@ -332,6 +370,26 @@ impl Search {
             }
         }
         self.history.pop();
+
+        // Never record a result the abort cut short: it was not really searched.
+        if !self.aborted {
+            let bound = if best >= beta {
+                Bound::Lower
+            } else if best > original_alpha {
+                Bound::Exact
+            } else {
+                Bound::Upper
+            };
+            self.tt.store(
+                pos.zobrist(),
+                best_move,
+                best,
+                0,
+                depth.clamp(0, u8::MAX as i32) as u8,
+                bound,
+                ply,
+            );
+        }
         best
     }
 
@@ -369,7 +427,7 @@ impl Search {
         // An empty list here means "nothing to capture", not "no legal moves":
         // checkmate and stalemate are the caller's business, and a quiet
         // position correctly returns its stand-pat.
-        order_moves(pos, &mut moves);
+        order_moves(pos, &mut moves, Move::NONE);
 
         let mut best = stand_pat;
         for mv in moves {
@@ -461,10 +519,10 @@ fn is_insufficient_material(pos: &Position) -> bool {
 /// This is only the cheap part — promotions, then captures by MVV-LVA (most
 /// valuable victim, least valuable attacker). Killers, history, and SEE arrive
 /// with milestone 8, and the transposition-table move with milestone 7.
-fn order_moves(pos: &Position, moves: &mut MoveList) {
+fn order_moves(pos: &Position, moves: &mut MoveList, tt_move: Move) {
     let mut scored: ArrayVec<(i32, Move), { crate::movegen::MAX_MOVES }> = ArrayVec::new();
     for &mv in moves.iter() {
-        scored.push((move_score(pos, mv), mv));
+        scored.push((move_score(pos, mv, tt_move), mv));
     }
     // Unstable sort so nothing is allocated inside the search.
     scored.sort_unstable_by(|a, b| b.0.cmp(&a.0));
@@ -473,9 +531,15 @@ fn order_moves(pos: &Position, moves: &mut MoveList) {
     }
 }
 
-fn move_score(pos: &Position, mv: Move) -> i32 {
+fn move_score(pos: &Position, mv: Move, tt_move: Move) -> i32 {
+    // Above everything: a move already proven best here outranks any capture.
+    const TT_BASE: i32 = 10_000_000;
     const PROMOTION_BASE: i32 = 2_000_000;
     const CAPTURE_BASE: i32 = 1_000_000;
+
+    if mv == tt_move && !mv.is_none() {
+        return TT_BASE;
+    }
 
     let mut score = 0;
     if let Some(promoted) = mv.promotion() {
@@ -717,6 +781,58 @@ mod tests {
     }
 
     #[test]
+    fn a_warm_table_shrinks_the_search() {
+        // Searching the same position twice through one shared table: the
+        // second pass inherits the first pass's best moves and prunes far
+        // harder. If this stops holding, the table is not being consulted.
+        let pos: Position = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"
+            .parse()
+            .unwrap();
+        let limits = SearchLimits {
+            max_depth: Some(5),
+            ..Default::default()
+        };
+        let mut search = Search::new(Arc::new(AtomicBool::new(false)));
+
+        let cold = search.run(&pos, limits, &mut |_| {});
+        let warm = search.run(&pos, limits, &mut |_| {});
+
+        assert!(
+            warm.nodes < cold.nodes,
+            "warm search visited {} nodes, cold visited {}",
+            warm.nodes,
+            cold.nodes
+        );
+        // And it must still reach the same conclusion.
+        assert_eq!(warm.score, cold.score);
+        assert_eq!(warm.depth, cold.depth);
+    }
+
+    #[test]
+    fn table_hits_do_not_change_the_answer() {
+        // A transposition-table cutoff returns a remembered score instead of
+        // searching. That has to agree with what a cold search finds.
+        for fen in [
+            "4k3/8/4p3/3p4/8/8/8/3QK3 w - - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "6k1/5ppp/8/8/8/8/8/R3K3 w - - 0 1",
+        ] {
+            let pos: Position = fen.parse().unwrap();
+            let limits = SearchLimits {
+                max_depth: Some(4),
+                ..Default::default()
+            };
+            let cold = Search::new(Arc::new(AtomicBool::new(false)))
+                .run(&pos, limits, &mut |_| {})
+                .score;
+            let mut shared = Search::new(Arc::new(AtomicBool::new(false)));
+            shared.run(&pos, limits, &mut |_| {});
+            let warm = shared.run(&pos, limits, &mut |_| {}).score;
+            assert_eq!(cold, warm, "{fen}");
+        }
+    }
+
+    #[test]
     fn node_limit_is_honoured() {
         let pos = Position::startpos();
         let mut search = Search::new(Arc::new(AtomicBool::new(false)));
@@ -836,7 +952,7 @@ mod tests {
     fn ordering_puts_captures_and_promotions_first() {
         let pos: Position = "4k3/8/8/3q4/8/8/8/3RK3 w - - 0 1".parse().unwrap();
         let mut moves = generate_legal(&pos);
-        order_moves(&pos, &mut moves);
+        order_moves(&pos, &mut moves, Move::NONE);
         assert_eq!(moves[0].to_string(), "d1d5", "queen capture leads");
         assert_eq!(moves.len(), generate_legal(&pos).len(), "no moves lost");
     }

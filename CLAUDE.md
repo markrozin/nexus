@@ -19,10 +19,12 @@ The engine is a library (`src/lib.rs`); the binary is only the stdin loop.
 | `search` | negamax, alpha-beta, quiescence, iterative deepening, time management |
 | `rng` | xorshift64\* PRNG |
 | `zobrist` | position hashing, const-built key tables |
+| `tt` | transposition table, lock-free via relaxed atomics |
+| `see` | static exchange evaluation |
 | `uci` | protocol handler, search worker thread |
 
-Not yet written: transposition table, NNUE. `go` runs alpha-beta with
-quiescence, to a time or depth limit.
+Not yet written: NNUE, and the heuristic pruning layer. `go` runs alpha-beta
+with quiescence and a transposition table, to a time or depth limit.
 
 ## Correctness
 
@@ -72,8 +74,8 @@ Perft is the gate.
 | 4 | UCI | loads and plays in a GUI | done (random mover) |
 | 5 | Eval + negamax + alpha-beta + ID | beats a random mover 100/100 | done |
 | 6 | Quiescence | SPRT pass | done (+292 Elo) |
-| 7 | Zobrist + TT | SPRT pass | next |
-| 8 | Move ordering + SEE | SPRT pass, node count drops sharply | |
+| 7 | Zobrist + TT | SPRT pass | done (+28, +121 Elo) |
+| 8 | Move ordering + SEE | SPRT pass, node count drops sharply | next |
 | 9 | SPRT pipeline | gives a verdict on a known-good change | done |
 | 10 | PVS, null move, LMR, futility | SPRT each independently | |
 | 11 | Handcrafted eval | SPRT each term | |
@@ -213,6 +215,7 @@ W/L/D and pentanomial tallies if you lose the console output anyway.
 | --- | --- | --- | --- |
 | Quiescence search (milestone 6) | H1 accepted | 354 | +292.3 +/- 36.2 |
 | Zobrist + repetition detection (milestone 7a) | H1 accepted | 1864 | +28.4 |
+| Transposition table (milestone 7b) | H1 accepted | 600 | +121.1 +/- 25.6 |
 
 A note on pacing: with `elo0=0 elo1=5`, each game contributes a bounded amount
 to the LLR, so a verdict costs a few hundred games no matter how large the true

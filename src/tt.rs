@@ -24,11 +24,18 @@
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
-use crate::search::{MATE_IN_MAX_PLY, MAX_PLY};
+use crate::search::MATE_IN_MAX_PLY;
 use crate::types::Move;
 
 /// Bytes per slot. Two `u64`s, so four slots to a 64-byte cache line.
 pub const ENTRY_BYTES: usize = 16;
+
+/// Hard ceiling on table size, whatever is asked for.
+///
+/// `setoption` allocates immediately, so an unbounded request would let a GUI
+/// mistake reserve every page on the machine. A single-threaded engine has no
+/// use for more than this anyway.
+pub const MAX_MEGABYTES: usize = 1_024;
 
 /// What a stored score means relative to the window it was found in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -105,17 +112,30 @@ pub struct TranspositionTable {
 
 impl TranspositionTable {
     /// Allocate a table of about `megabytes` MB, rounded down to a power of two
-    /// number of slots. Always at least one slot.
+    /// number of slots.
+    ///
+    /// Falls back by halving if the machine cannot supply that much. A `Hash`
+    /// value larger than physical memory is a user or GUI mistake, and an
+    /// engine that aborts the process over one is a bad citizen: the default
+    /// allocator aborts on failure, so the request has to be fallible.
     pub fn new(megabytes: usize) -> Self {
-        let wanted = megabytes.max(1) * 1024 * 1024 / ENTRY_BYTES;
-        let slots = wanted.next_power_of_two().min(wanted.max(1)).max(1);
-        // `next_power_of_two` rounds up, which would overshoot the budget, so
-        // step back down unless that lands on zero.
-        let slots = if slots > wanted { slots / 2 } else { slots }.max(1);
-        Self {
-            slots: (0..slots).map(|_| Slot::default()).collect(),
-            mask: slots - 1,
-            age: AtomicU8::new(0),
+        let wanted = megabytes.clamp(1, MAX_MEGABYTES) * 1024 * 1024 / ENTRY_BYTES;
+        // Largest power of two that fits the budget, so indexing is a mask.
+        // Rounding up would overshoot the memory the user asked for.
+        let mut slots = 1usize << wanted.max(1).ilog2();
+        loop {
+            let mut storage: Vec<Slot> = Vec::new();
+            if storage.try_reserve_exact(slots).is_ok() {
+                storage.extend((0..slots).map(|_| Slot::default()));
+                return Self {
+                    slots: storage.into_boxed_slice(),
+                    mask: slots - 1,
+                    age: AtomicU8::new(0),
+                };
+            }
+            // One slot always fits; `try_reserve_exact` cannot fail on it.
+            slots /= 2;
+            assert!(slots >= 1, "could not allocate even a single table slot");
         }
     }
 
@@ -279,6 +299,23 @@ mod tests {
     }
 
     #[test]
+    fn an_impossible_request_degrades_instead_of_aborting() {
+        // A GUI or a fat-fingered `setoption` can ask for more memory than the
+        // machine has. The allocator aborts the process on failure, so the
+        // request has to shrink rather than be attempted.
+        let tt = TranspositionTable::new(usize::MAX / (1024 * 1024));
+        assert!(tt.len().is_power_of_two());
+        assert!(!tt.is_empty());
+        assert!(
+            tt.len() * ENTRY_BYTES <= MAX_MEGABYTES * 1024 * 1024,
+            "ignored its own ceiling"
+        );
+        // Still a working table.
+        tt.store(0xABCD_EF01, a_move(), 5, 0, 3, Bound::Exact, 0);
+        assert_eq!(tt.probe(0xABCD_EF01, 0).unwrap().score, 5);
+    }
+
+    #[test]
     fn round_trips_a_stored_entry() {
         let tt = TranspositionTable::new(1);
         let key = 0x0123_4567_89ab_cdef;
@@ -325,18 +362,19 @@ mod tests {
         tt.store(key, a_move(), mate_at_ply_6, 0, 5, Bound::Exact, 6);
 
         assert_eq!(tt.probe(key, 6).unwrap().score, mate_at_ply_6);
-        // Two plies shallower: the same mate is now two plies further away.
-        assert_eq!(tt.probe(key, 4).unwrap().score, mate_at_ply_6 - 2);
+        // Reused two plies shallower, the mate is the same distance from the
+        // node but two plies closer to the root, so it scores higher.
+        assert_eq!(tt.probe(key, 4).unwrap().score, mate_at_ply_6 + 2);
 
         // Symmetric for being mated.
         tt.store(key, a_move(), -mate_at_ply_6, 0, 5, Bound::Exact, 6);
         assert_eq!(tt.probe(key, 6).unwrap().score, -mate_at_ply_6);
-        assert_eq!(tt.probe(key, 4).unwrap().score, -(mate_at_ply_6 - 2));
+        assert_eq!(tt.probe(key, 4).unwrap().score, -(mate_at_ply_6 + 2));
     }
 
     #[test]
     fn ordinary_scores_are_not_ply_adjusted() {
-        for ply in [0usize, 1, 50, MAX_PLY - 1] {
+        for ply in [0usize, 1, 50, 127] {
             assert_eq!(score_to_tt(123, ply), 123);
             assert_eq!(score_from_tt(123, ply), 123);
             assert_eq!(score_to_tt(-123, ply), -123);

@@ -24,6 +24,8 @@ mod magic_constants;
 pub mod movegen;
 pub mod rng;
 pub mod search;
+pub mod see;
+pub mod tt;
 pub mod types;
 pub mod uci;
 pub mod zobrist;
