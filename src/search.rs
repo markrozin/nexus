@@ -488,6 +488,20 @@ impl Search {
         // never apply.
         order_moves(pos, &mut moves, Move::NONE, [Move::NONE; 2], &self.quiet_history);
 
+        // Skipping losing captures here is the textbook next step, and it was
+        // tried and rejected. Depth 8 from the Ruy Lopez after 3...Nf6:
+        //
+        // ```text
+        //   without   2,877,331 nodes  2,426,080 nps  1186 ms
+        //   with      3,457,467 nodes  1,325,207 nps  2609 ms
+        // ```
+        //
+        // Half the nps went on recomputing SEE that `order_moves` had already
+        // computed, which an implementation that reused the sort key would
+        // recover. The 20% *node* growth would not: dropping sacrifices makes
+        // leaf values less accurate, and those values go into the transposition
+        // table and misorder the main tree. Worth retrying once the evaluation
+        // is strong enough that qsearch size matters more than qsearch accuracy.
         let mut best = stand_pat;
         for mv in moves {
             self.nodes += 1;
