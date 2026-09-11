@@ -1,2 +1,2 @@
-d0d24c7
-m7 pending commit: + transposition table (+121 Elo over m7a)
+848aec1
+m8 pending commit: + SEE/killer/history ordering (+60 Elo over m7)
