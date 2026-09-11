@@ -5,12 +5,15 @@
 //! one function handles both players and the recursive call just negates and
 //! swaps the window.
 //!
-//! Alpha-beta is exact — it returns what plain minimax would — so nothing here
-//! needs an SPRT to justify it. The heuristic layer (PVS, null move, LMR,
-//! futility) does, and none of it is here yet.
+//! Alpha-beta, PVS and quiescence are exact: they return what plain minimax
+//! would, so none of them needed an SPRT to justify. Null move pruning is not
+//! exact — it trades occasional correctness for depth — and did.
 //!
-//! Not yet present: killer and history ordering for quiet moves, and the
-//! heuristic pruning layer (PVS, null move, LMR, futility).
+//! Present: alpha-beta, quiescence, iterative deepening, a transposition table,
+//! SEE/killer/history move ordering, PVS, and null move pruning.
+//!
+//! Not yet present: late move reductions, reverse futility, futility, and late
+//! move pruning.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -55,6 +58,10 @@ const DEFAULT_TT_MB: usize = 1;
 /// Cap on a quiet-history entry. Keeps the gravity update bounded and keeps
 /// history well below the capture tiers in the ordering.
 const MAX_HISTORY: i32 = 16_384;
+
+/// Shallowest depth worth trying a null move at. Below this the reduced
+/// search is so cheap that the saving does not cover being wrong.
+const NULL_MOVE_MIN_DEPTH: i32 = 3;
 
 /// How often to consult the clock. Checking every node is measurable.
 const CLOCK_CHECK_INTERVAL: u64 = 2048;
@@ -152,6 +159,9 @@ pub struct Search {
     /// cutoff anywhere in the search: the only signal available for ranking
     /// quiet moves against each other.
     quiet_history: Box<[i32]>,
+    /// False while a null move is already in effect on this branch. Two in a
+    /// row would just be passing the turn back and forth, which proves nothing.
+    null_move_allowed: bool,
     /// Cleared until the first iteration completes. Depth 1 is cheap and the
     /// engine must always answer with a move it actually searched, so the stop
     /// flag and the clock are not consulted until it is done.
@@ -180,6 +190,7 @@ impl Search {
             game_plies: 0,
             killers: [[Move::NONE; 2]; MAX_PLY],
             quiet_history: vec![0; Color::COUNT * 64 * 64].into_boxed_slice(),
+            null_move_allowed: true,
             first_iteration_done: false,
             aborted: false,
         }
@@ -267,6 +278,7 @@ impl Search {
         self.nodes = 0;
         self.aborted = false;
         self.first_iteration_done = false;
+        self.null_move_allowed = true;
         self.limits = limits;
         self.start = Instant::now();
         self.deadline = limits.budget.map(|b| self.start + b);
@@ -376,9 +388,44 @@ impl Search {
             }
         }
 
+        // Hoisted: null move needs it, and the terminal test below reuses it.
+        let in_check = pos.in_check(pos.side_to_move());
+
+        // Null move pruning. Hand the opponent a free move; if the position is
+        // still good enough to beat beta even after that, it is far too good
+        // for them to have allowed, and the whole subtree can go.
+        //
+        // The conditions are all load-bearing. A null move while in check
+        // leaves the king capturable. In a PV node the exact value matters and
+        // cannot be replaced by a bound. Two nulls in a row prove nothing. And
+        // with only pawns and a king the assumption fails outright: in zugzwang
+        // having to move is the whole problem, so "a free pass cannot hurt" is
+        // exactly backwards.
+        let is_pv = beta - alpha > 1;
+        if !is_pv
+            && !in_check
+            && depth >= NULL_MOVE_MIN_DEPTH
+            && self.null_move_allowed
+            && has_non_pawn_material(pos, pos.side_to_move())
+        {
+            let reduction = 3 + depth / 6;
+            let child = pos.make_null_move();
+            self.null_move_allowed = false;
+            let score = -self.negamax(&child, -beta, -beta + 1, depth - reduction - 1, ply + 1);
+            self.null_move_allowed = true;
+            if self.aborted {
+                return DRAW;
+            }
+            if score >= beta {
+                // A mate score proved by giving away a move is not a real mate,
+                // so report the bound instead of a claim we cannot back.
+                return if score >= MATE_IN_MAX_PLY { beta } else { score };
+            }
+        }
+
         let mut moves = generate_legal(pos);
         if moves.is_empty() {
-            return if pos.in_check(pos.side_to_move()) {
+            return if in_check {
                 // Prefer the shorter mate. Without the ply term every mate
                 // scores the same and the engine shuffles instead of finishing.
                 -MATE + ply as i32
@@ -405,10 +452,26 @@ impl Search {
         let original_alpha = alpha;
         let mut best = -INFINITY;
         let mut best_move = Move::NONE;
-        for mv in moves {
+        for (index, mv) in moves.into_iter().enumerate() {
             self.nodes += 1;
             let child = pos.make_move(mv);
-            let score = -self.negamax(&child, -beta, -alpha, depth - 1, ply + 1);
+
+            // Principal variation search. Ordering is good enough that the
+            // first move is usually best, so every later move is first probed
+            // with a null window, which is far cheaper because it can only
+            // prove "not better than alpha" rather than establishing a value.
+            // A probe that beats alpha was a genuine surprise and gets a real
+            // search; with good ordering that is rare enough to pay for itself.
+            let score = if index == 0 {
+                -self.negamax(&child, -beta, -alpha, depth - 1, ply + 1)
+            } else {
+                let probe = -self.negamax(&child, -alpha - 1, -alpha, depth - 1, ply + 1);
+                if probe > alpha && probe < beta {
+                    -self.negamax(&child, -beta, -alpha, depth - 1, ply + 1)
+                } else {
+                    probe
+                }
+            };
             if self.aborted {
                 return DRAW;
             }
@@ -567,6 +630,17 @@ impl Search {
             None => false,
         }
     }
+}
+
+/// Does `color` have anything but pawns and a king?
+///
+/// Null move pruning assumes a free pass cannot make your position worse. With
+/// only pawns left that assumption inverts: zugzwang positions are exactly the
+/// ones where being obliged to move is the problem, and a null move would
+/// "prove" a cutoff that a real move cannot deliver.
+fn has_non_pawn_material(pos: &Position, color: Color) -> bool {
+    (pos.colored(color) - pos.pieces(color, PieceType::Pawn) - pos.pieces(color, PieceType::King))
+        .any()
 }
 
 /// Draws that no amount of searching can escape: king versus king, and king
@@ -835,6 +909,11 @@ mod tests {
     /// Leaves go through full-window quiescence, the same leaf value function
     /// the real search uses. The claim under test is that *pruning* changes
     /// nothing, not that the two use different evaluators.
+    ///
+    /// Scope: this covers alpha-beta, PVS and quiescence, all of which are
+    /// exact. It deliberately does not cover null move pruning, which is a
+    /// gamble and *can* change the answer -- at depth 2 with a full window the
+    /// null move conditions never fire.
     fn minimax(search: &mut Search, pos: &Position, depth: i32, ply: usize) -> i32 {
         if depth <= 0 {
             return search.quiescence(pos, -INFINITY, INFINITY, ply);

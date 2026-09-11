@@ -389,6 +389,38 @@ impl Position {
         next
     }
 
+    /// Pass the turn without moving anything.
+    ///
+    /// Not a legal chess move — it exists so the search can ask "if I did
+    /// nothing at all, would this position still be good enough to prune?"
+    /// Castling rights are untouched; the en passant square is cleared, because
+    /// the chance to capture expires the moment it is not taken.
+    ///
+    /// Illegal to use while in check, and unsound in zugzwang, where being
+    /// obliged to move is precisely the problem. Both are the caller's
+    /// responsibility.
+    pub fn make_null_move(&self) -> Self {
+        debug_assert!(
+            !self.in_check(self.side_to_move),
+            "null move while in check leaves the king capturable"
+        );
+        let mut next = *self;
+        next.zobrist ^= self.en_passant_key();
+        next.ep_square = None;
+        next.side_to_move = self.side_to_move.flip();
+        next.zobrist ^= zobrist::side_to_move();
+        next.halfmove_clock = next.halfmove_clock.saturating_add(1);
+        if self.side_to_move == Color::Black {
+            next.fullmove_number += 1;
+        }
+        debug_assert_eq!(
+            next.zobrist,
+            zobrist::compute(&next),
+            "incremental Zobrist key drifted after a null move"
+        );
+        next
+    }
+
     // -- invariants ---------------------------------------------------------
 
     /// Panic if the mailbox and the bitboards disagree.

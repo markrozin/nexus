@@ -274,7 +274,6 @@ version = "0.1.0"
 dependencies = [
  "arrayvec",
  "criterion",
- "rayon",
 ]
 
 [[package]]
