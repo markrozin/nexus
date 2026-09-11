@@ -1,2 +1,2 @@
-b4465de
-milestone 6 pending commit: + quiescence (SPRT +292 Elo over m5)
+e56d7a8
+m7a pending commit: + zobrist and repetition detection (+28 Elo over m6)

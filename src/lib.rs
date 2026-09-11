@@ -26,3 +26,4 @@ pub mod rng;
 pub mod search;
 pub mod types;
 pub mod uci;
+pub mod zobrist;

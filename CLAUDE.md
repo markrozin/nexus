@@ -18,6 +18,7 @@ The engine is a library (`src/lib.rs`); the binary is only the stdin loop.
 | `eval` | material, tapered piece-square tables |
 | `search` | negamax, alpha-beta, quiescence, iterative deepening, time management |
 | `rng` | xorshift64\* PRNG |
+| `zobrist` | position hashing, const-built key tables |
 | `uci` | protocol handler, search worker thread |
 
 Not yet written: transposition table, NNUE. `go` runs alpha-beta with
@@ -201,11 +202,17 @@ lesson about small samples in one line.
 
 Use `-concurrency 3` on this 8-core box: each game is two engine processes, and
 oversubscription shows up as timing noise.
+
+Always pass `-log file=<abs path> level=warn`, and never pipe the run through
+`tail`: the SPRT verdict line prints before the per-player summary, so a tail
+window silently discards it. `config.json` in the working directory keeps the
+W/L/D and pentanomial tallies if you lose the console output anyway.
 ### Results so far
 
 | Change | Result | Games | Elo |
 | --- | --- | --- | --- |
 | Quiescence search (milestone 6) | H1 accepted | 354 | +292.3 +/- 36.2 |
+| Zobrist + repetition detection (milestone 7a) | H1 accepted | 1864 | +28.4 |
 
 A note on pacing: with `elo0=0 elo1=5`, each game contributes a bounded amount
 to the LLR, so a verdict costs a few hundred games no matter how large the true

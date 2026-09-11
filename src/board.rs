@@ -21,6 +21,7 @@ use core::str::FromStr;
 use crate::bitboard::{king_attacks, knight_attacks, pawn_attacks, Bitboard};
 use crate::magic::{bishop_attacks, rook_attacks};
 use crate::types::{CastlingRights, Color, Move, Piece, PieceType, Square};
+use crate::zobrist;
 
 pub const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
@@ -97,6 +98,8 @@ pub struct Position {
     ep_square: Option<Square>,
     halfmove_clock: u16,
     fullmove_number: u16,
+    /// Incrementally maintained; see `crate::zobrist`.
+    zobrist: u64,
 }
 
 impl Default for Position {
@@ -118,6 +121,7 @@ impl Position {
             ep_square: None,
             halfmove_clock: 0,
             fullmove_number: 1,
+            zobrist: 0,
         }
     }
 
@@ -192,6 +196,23 @@ impl Position {
         self.mailbox[sq.index()]
     }
 
+    /// The en passant part of the key, zero unless a pawn can actually make
+    /// the capture. See `zobrist::en_passant_if_capturable`.
+    #[inline]
+    fn en_passant_key(&self) -> u64 {
+        zobrist::en_passant_if_capturable(
+            self.ep_square,
+            self.side_to_move,
+            self.pieces(self.side_to_move, PieceType::Pawn),
+        )
+    }
+
+    /// The Zobrist key for this position.
+    #[inline]
+    pub const fn zobrist(&self) -> u64 {
+        self.zobrist
+    }
+
     /// `None` only for malformed positions; real games always have both kings.
     #[inline]
     pub fn king_square(&self, color: Color) -> Option<Square> {
@@ -246,6 +267,7 @@ impl Position {
         );
         let mask = sq.bb();
         self.mailbox[sq.index()] = Some(piece);
+        self.zobrist ^= crate::zobrist::piece_square(piece, sq);
         self.piece_bb[piece.color().index()][piece.piece_type().index()] |= mask;
         self.color_bb[piece.color().index()] |= mask;
         self.occupancy |= mask;
@@ -255,6 +277,7 @@ impl Position {
     fn remove(&mut self, sq: Square) -> Option<Piece> {
         let piece = self.mailbox[sq.index()].take()?;
         let mask = sq.bb();
+        self.zobrist ^= crate::zobrist::piece_square(piece, sq);
         self.piece_bb[piece.color().index()][piece.piece_type().index()] ^= mask;
         self.color_bb[piece.color().index()] ^= mask;
         self.occupancy ^= mask;
@@ -281,6 +304,11 @@ impl Position {
             .piece_at(from)
             .expect("make_move called with an empty origin square")
             .piece_type();
+
+        // The state half of the key: old values out here, new ones back in at
+        // the end. `put` and `remove` carry the piece half themselves.
+        next.zobrist ^= zobrist::castling(self.castling);
+        next.zobrist ^= self.en_passant_key();
 
         next.ep_square = None;
         next.halfmove_clock = next.halfmove_clock.saturating_add(1);
@@ -330,6 +358,17 @@ impl Position {
         if us == Color::Black {
             next.fullmove_number += 1;
         }
+        next.zobrist ^= zobrist::castling(next.castling);
+        next.zobrist ^= next.en_passant_key();
+        next.zobrist ^= zobrist::side_to_move();
+
+        // An incremental-key bug surfaces much later as corrupted
+        // transposition-table hits, so catch it at the source.
+        debug_assert_eq!(
+            next.zobrist,
+            zobrist::compute(&next),
+            "incremental Zobrist key drifted after {mv}"
+        );
         next
     }
 
@@ -394,6 +433,12 @@ impl Position {
                 "{color:?} has more than one king"
             );
         }
+
+        assert_eq!(
+            self.zobrist,
+            zobrist::compute(self),
+            "Zobrist key does not match the board"
+        );
 
         if let Some(ep) = self.ep_square {
             assert!(
@@ -513,6 +558,7 @@ impl FromStr for Position {
                 .map_err(|_| FenError::BadFullmoveNumber(field.to_owned()))?;
         }
 
+        pos.zobrist = zobrist::compute(&pos);
         Ok(pos)
     }
 }
