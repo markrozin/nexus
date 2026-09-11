@@ -41,6 +41,11 @@ pub const MATE_IN_MAX_PLY: i32 = MATE - MAX_PLY as i32;
 
 pub const DRAW: i32 = 0;
 
+/// Game plies the repetition history reserves room for. Longer games simply
+/// drop their oldest entries, which can only lose a repetition detection, never
+/// invent one.
+const MAX_GAME_PLIES: usize = 1024;
+
 /// How often to consult the clock. Checking every node is measurable.
 const CLOCK_CHECK_INTERVAL: u64 = 2048;
 
@@ -121,6 +126,12 @@ pub struct Search {
     limits: SearchLimits,
     deadline: Option<Instant>,
     start: Instant,
+    /// Zobrist keys of the game so far, then of the current search path.
+    /// Reserved once; `push` inside the search never reallocates.
+    history: Vec<u64>,
+    /// How many leading `history` entries belong to the game rather than the
+    /// search tree.
+    game_plies: usize,
     /// Cleared until the first iteration completes. Depth 1 is cheap and the
     /// engine must always answer with a move it actually searched, so the stop
     /// flag and the clock are not consulted until it is done.
@@ -139,9 +150,43 @@ impl Search {
             limits: SearchLimits::default(),
             deadline: None,
             start: Instant::now(),
+            history: Vec::with_capacity(MAX_PLY + MAX_GAME_PLIES),
+            game_plies: 0,
             first_iteration_done: false,
             aborted: false,
         }
+    }
+
+    /// Zobrist keys of every position played before the search root, oldest
+    /// first. Without it the engine cannot see a repetition it has already
+    /// walked into and will shuffle away won games.
+    pub fn set_game_history(&mut self, keys: &[u64]) {
+        self.history.clear();
+        let start = keys.len().saturating_sub(MAX_GAME_PLIES);
+        self.history.extend_from_slice(&keys[start..]);
+        self.game_plies = self.history.len();
+    }
+
+    /// Has this position already occurred on the path to it?
+    ///
+    /// One earlier occurrence is enough. Inside a search a repetition means
+    /// either side can force the draw, so waiting for a third occurrence only
+    /// wastes depth.
+    ///
+    /// Only the last `halfmove_clock` plies can match: a pawn move or capture
+    /// is irreversible, so nothing before one can recur. Positions repeat every
+    /// second ply, hence the stride.
+    fn is_repetition(&self, key: u64, halfmove_clock: u16) -> bool {
+        let seen = self.history.len();
+        let reversible = (halfmove_clock as usize).min(seen);
+        let mut back = 2;
+        while back <= reversible {
+            if self.history[seen - back] == key {
+                return true;
+            }
+            back += 2;
+        }
+        false
     }
 
     pub fn nodes(&self) -> u64 {
@@ -185,6 +230,8 @@ impl Search {
 
         let max_depth = limits.max_depth.unwrap_or(MAX_PLY as u32 - 1);
         for depth in 1..=max_depth.min(MAX_PLY as u32 - 1) {
+            // An aborted iteration unwinds without popping, so reset the path.
+            self.history.truncate(self.game_plies);
             let score = self.negamax(pos, -INFINITY, INFINITY, depth as i32, 0);
 
             // A partial iteration is not comparable to a complete one: its
@@ -237,6 +284,9 @@ impl Search {
         if ply > 0 && pos.halfmove_clock() >= 100 {
             return DRAW;
         }
+        if ply > 0 && self.is_repetition(pos.zobrist(), pos.halfmove_clock()) {
+            return DRAW;
+        }
         if ply > 0 && is_insufficient_material(pos) {
             return DRAW;
         }
@@ -255,6 +305,9 @@ impl Search {
             };
         }
         order_moves(pos, &mut moves);
+
+        // On the path from here down, this position counts as seen.
+        self.history.push(pos.zobrist());
 
         // Fail-soft: return the true best even when it falls outside the
         // window, which gives the transposition table a tighter bound later.
@@ -278,6 +331,7 @@ impl Search {
                 }
             }
         }
+        self.history.pop();
         best
     }
 
@@ -686,6 +740,77 @@ mod tests {
         let result = search.run(&pos, SearchLimits::default(), &mut |_| {});
         let legal: Vec<String> = generate_legal(&pos).iter().map(|m| m.to_string()).collect();
         assert!(legal.contains(&result.best_move.to_string()));
+    }
+
+    #[test]
+    fn a_losing_side_can_save_itself_by_repetition() {
+        // White is down a rook and in check, so material alone scores this
+        // around -500. But the king can shuffle and force a repetition inside
+        // the search horizon, and a draw beats being a rook down.
+        //
+        // Without repetition detection this returns the material score, so the
+        // assertion below is exactly what the feature buys.
+        let pos: Position = "7k/8/8/8/8/8/r7/K7 w - - 10 40".parse().unwrap();
+        let mut search = Search::new(Arc::new(AtomicBool::new(false)));
+        let score = search
+            .run(
+                &pos,
+                SearchLimits {
+                    max_depth: Some(4),
+                    ..Default::default()
+                },
+                &mut |_| {},
+            )
+            .score;
+        assert_eq!(score, DRAW, "should have found the repetition");
+
+        // And the detector fires on a key already in the game history. Two
+        // entries, not one: the immediately preceding position has the other
+        // side to move and can never match, so a repetition is at least two
+        // plies back.
+        search.set_game_history(&[pos.zobrist(), 0xDEAD_BEEF]);
+        assert!(search.is_repetition(pos.zobrist(), 10));
+    }
+
+    #[test]
+    fn repetition_only_looks_back_to_the_last_irreversible_move() {
+        let pos = Position::startpos();
+        let mut search = Search::new(Arc::new(AtomicBool::new(false)));
+        search.set_game_history(&[0xAA, 0xBB, 0xCC, 0xDD]);
+
+        // Two plies back is 0xCC. A clock of 2 can reach it; a clock of 1 or 0
+        // means an irreversible move intervened and nothing can match.
+        assert!(search.is_repetition(0xCC, 2));
+        assert!(!search.is_repetition(0xCC, 1));
+        assert!(!search.is_repetition(0xCC, 0));
+        // 0xDD is one ply back, so it is the other side to move and never a
+        // repetition candidate; the stride skips it.
+        assert!(!search.is_repetition(0xDD, 100));
+        // Four plies back is reachable with a long enough clock.
+        assert!(search.is_repetition(0xAA, 4));
+        assert!(!search.is_repetition(0xAA, 3));
+        assert!(!search.is_repetition(0x99, 100), "absent key must not match");
+        let _ = pos;
+    }
+
+    #[test]
+    fn the_search_path_itself_counts_as_history() {
+        // A forced shuffle: the only non-losing continuation repeats. The search
+        // must score it a draw rather than believing it is winning.
+        let pos: Position = "7k/8/8/8/8/8/8/K6R w - - 0 1".parse().unwrap();
+        let mut search = Search::new(Arc::new(AtomicBool::new(false)));
+        let result = search.run(
+            &pos,
+            SearchLimits {
+                max_depth: Some(5),
+                ..Default::default()
+            },
+            &mut |_| {},
+        );
+        // White is up a rook and should not be talking itself into a draw here.
+        assert!(result.score > 300, "score was {}", result.score);
+        // History must be back to its starting length once the search returns.
+        assert_eq!(search.history.len(), search.game_plies);
     }
 
     #[test]

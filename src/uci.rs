@@ -208,6 +208,8 @@ pub fn apply_uci_move(pos: &Position, text: &str) -> Option<Position> {
 
 pub struct Uci<W: Sink> {
     position: Position,
+    /// Zobrist keys of every position before `position`, oldest first.
+    history: Vec<u64>,
     out: W,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -225,6 +227,7 @@ impl<W: Sink> Uci<W> {
     pub fn new(out: W) -> Self {
         Self {
             position: Position::startpos(),
+            history: Vec::new(),
             out,
             stop: Arc::new(AtomicBool::new(false)),
             worker: None,
@@ -273,6 +276,7 @@ impl<W: Sink> Uci<W> {
             "ucinewgame" => {
                 self.stop_search();
                 self.position = Position::startpos();
+                self.history.clear();
             }
             "setoption" => self.cmd_setoption(args)?,
             "position" => self.cmd_position(args)?,
@@ -365,9 +369,13 @@ impl<W: Sink> Uci<W> {
         };
 
         // Apply to a scratch copy so a bad move leaves the old position intact.
+        let mut history = Vec::with_capacity(moves.len());
         for text in moves {
             match apply_uci_move(&pos, text) {
-                Some(next) => pos = next,
+                Some(next) => {
+                    history.push(pos.zobrist());
+                    pos = next;
+                }
                 None => {
                     return self.send(&format!(
                         "info string illegal move {text:?}; position unchanged"
@@ -376,6 +384,7 @@ impl<W: Sink> Uci<W> {
             }
         }
         self.position = pos;
+        self.history = history;
         Ok(())
     }
 
@@ -386,13 +395,14 @@ impl<W: Sink> Uci<W> {
 
         let limits = Limits::parse(args);
         let position = self.position;
+        let history = self.history.clone();
         let stop = Arc::clone(&self.stop);
         let out = self.out.clone();
 
 
         stop.store(false, Ordering::Relaxed);
         self.worker = Some(thread::spawn(move || {
-            run_search(position, limits, stop, out);
+            run_search(position, &history, limits, stop, out);
         }));
         Ok(())
     }
@@ -424,7 +434,13 @@ impl<W: Sink> Drop for Uci<W> {
 ///
 /// The search watches the stop flag itself, so there is no polling loop here;
 /// `go infinite` simply has no depth or time limit to hit.
-fn run_search<W: Sink>(pos: Position, limits: Limits, stop: Arc<AtomicBool>, mut out: W) {
+fn run_search<W: Sink>(
+    pos: Position,
+    history: &[u64],
+    limits: Limits,
+    stop: Arc<AtomicBool>,
+    mut out: W,
+) {
     let search_limits = SearchLimits {
         max_depth: limits.depth,
         max_nodes: limits.nodes,
@@ -432,6 +448,7 @@ fn run_search<W: Sink>(pos: Position, limits: Limits, stop: Arc<AtomicBool>, mut
     };
 
     let mut search = Search::new(stop);
+    search.set_game_history(history);
     let result = search.run(&pos, search_limits, &mut |info| {
         report_iteration(&mut out, info);
     });
