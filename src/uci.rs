@@ -20,6 +20,7 @@ use std::time::Duration;
 use crate::board::Position;
 use crate::movegen::generate_legal;
 use crate::search::{score_to_uci, IterationInfo, Search, SearchLimits};
+use crate::tt::TranspositionTable;
 use crate::types::Color;
 
 pub const ENGINE_NAME: &str = "newchessbot";
@@ -100,7 +101,10 @@ pub struct Options {
 impl Options {
     pub const HASH_DEFAULT: usize = 16;
     pub const HASH_MIN: usize = 1;
-    pub const HASH_MAX: usize = 65_536;
+    /// Advertised maximum. `setoption` allocates immediately, so this has to
+    /// be a size a real machine can supply; there is no point offering 64 GB
+    /// to a single-threaded engine that cannot use it.
+    pub const HASH_MAX: usize = crate::tt::MAX_MEGABYTES;
     pub const THREADS_DEFAULT: usize = 1;
     pub const THREADS_MIN: usize = 1;
     pub const THREADS_MAX: usize = 1_024;
@@ -210,6 +214,9 @@ pub struct Uci<W: Sink> {
     position: Position,
     /// Zobrist keys of every position before `position`, oldest first.
     history: Vec<u64>,
+    /// Shared with the search worker and reused across moves; that reuse is
+    /// the entire point of the table.
+    tt: Arc<TranspositionTable>,
     out: W,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -228,6 +235,7 @@ impl<W: Sink> Uci<W> {
         Self {
             position: Position::startpos(),
             history: Vec::new(),
+            tt: Arc::new(TranspositionTable::new(Options::HASH_DEFAULT)),
             out,
             stop: Arc::new(AtomicBool::new(false)),
             worker: None,
@@ -277,6 +285,8 @@ impl<W: Sink> Uci<W> {
                 self.stop_search();
                 self.position = Position::startpos();
                 self.history.clear();
+                // Entries from the previous game are noise at best.
+                self.tt.clear();
             }
             "setoption" => self.cmd_setoption(args)?,
             "position" => self.cmd_position(args)?,
@@ -340,7 +350,11 @@ impl<W: Sink> Uci<W> {
 
         match name.to_ascii_lowercase().as_str() {
             "hash" => match value.parse::<usize>() {
-                Ok(v) => self.options.hash_mb = v.clamp(Options::HASH_MIN, Options::HASH_MAX),
+                Ok(v) => {
+                    self.options.hash_mb = v.clamp(Options::HASH_MIN, Options::HASH_MAX);
+                    // Resizing means reallocating, so the old contents go.
+                    self.tt = Arc::new(TranspositionTable::new(self.options.hash_mb));
+                }
                 Err(_) => return self.send(&format!("info string bad Hash value {value:?}")),
             },
             "threads" => match value.parse::<usize>() {
@@ -396,13 +410,14 @@ impl<W: Sink> Uci<W> {
         let limits = Limits::parse(args);
         let position = self.position;
         let history = self.history.clone();
+        let tt = Arc::clone(&self.tt);
         let stop = Arc::clone(&self.stop);
         let out = self.out.clone();
 
 
         stop.store(false, Ordering::Relaxed);
         self.worker = Some(thread::spawn(move || {
-            run_search(position, &history, limits, stop, out);
+            run_search(position, &history, limits, stop, tt, out);
         }));
         Ok(())
     }
@@ -439,6 +454,7 @@ fn run_search<W: Sink>(
     history: &[u64],
     limits: Limits,
     stop: Arc<AtomicBool>,
+    tt: Arc<TranspositionTable>,
     mut out: W,
 ) {
     let search_limits = SearchLimits {
@@ -447,10 +463,11 @@ fn run_search<W: Sink>(
         budget: limits.budget(pos.side_to_move()),
     };
 
-    let mut search = Search::new(stop);
+    let hashfull = Arc::clone(&tt);
+    let mut search = Search::with_table(stop, tt);
     search.set_game_history(history);
     let result = search.run(&pos, search_limits, &mut |info| {
-        report_iteration(&mut out, info);
+        report_iteration(&mut out, info, hashfull.permille_full());
     });
 
     let _ = writeln!(&mut out, "bestmove {}", result.best_move);
@@ -459,17 +476,18 @@ fn run_search<W: Sink>(
 
 /// One `info` line. Written field by field rather than through a collected
 /// string, so reporting never allocates.
-fn report_iteration<W: Sink>(out: &mut W, info: IterationInfo<'_>) {
+fn report_iteration<W: Sink>(out: &mut W, info: IterationInfo, hashfull: u32) {
     // Clamp to 1ms so a sub-millisecond iteration does not divide by zero.
     let ms = (info.elapsed.as_millis() as u64).max(1);
     let _ = write!(
         out,
-        "info depth {} score {} nodes {} nps {} time {}",
+        "info depth {} score {} nodes {} nps {} time {} hashfull {}",
         info.depth,
         score_to_uci(info.score),
         info.nodes,
         info.nodes * 1000 / ms,
         info.elapsed.as_millis(),
+        hashfull,
     );
     if !info.pv.is_empty() {
         let _ = write!(out, " pv");
@@ -511,7 +529,7 @@ mod tests {
             vec![
                 id_line(),
                 format!("id author {ENGINE_AUTHOR}"),
-                "option name Hash type spin default 16 min 1 max 65536".to_string(),
+                "option name Hash type spin default 16 min 1 max 1024".to_string(),
                 "option name Threads type spin default 1 min 1 max 1024".to_string(),
                 "uciok".to_string(),
                 "readyok".to_string(),
@@ -625,8 +643,11 @@ mod tests {
             }
         );
 
-        uci.handle("setoption name Hash value 999999999").unwrap();
-        assert_eq!(uci.options().hash_mb, Options::HASH_MAX);
+        // Clamping is checked at small sizes on purpose: `setoption` allocates,
+        // and asking for the advertised maximum here would reserve a gigabyte
+        // for no benefit. `TranspositionTable::new` covers the huge case.
+        uci.handle("setoption name Hash value 0").unwrap();
+        assert_eq!(uci.options().hash_mb, Options::HASH_MIN);
         uci.handle("setoption name Threads value 0").unwrap();
         assert_eq!(uci.options().threads, Options::THREADS_MIN);
     }

@@ -477,6 +477,21 @@ impl Move {
     pub const fn is_none(self) -> bool {
         self.0 == 0
     }
+
+    /// The raw 16-bit packing. The transposition table stores a move in one
+    /// `u16` field, so it needs the bits directly.
+    #[inline]
+    pub const fn bits(self) -> u16 {
+        self.0
+    }
+
+    /// Rebuild from [`Move::bits`]. Any `u16` decodes to *some* move, so a
+    /// value read back out of a hash table must still be checked for legality
+    /// before it is played.
+    #[inline]
+    pub const fn from_bits(bits: u16) -> Self {
+        Self(bits)
+    }
 }
 
 impl fmt::Display for Move {

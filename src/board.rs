@@ -246,6 +246,23 @@ impl Position {
         false
     }
 
+    /// Every piece of either color attacking `sq`, given `occupied`.
+    ///
+    /// The occupancy is an explicit parameter because callers need to ask what
+    /// would be true if some piece were not there. Static exchange evaluation
+    /// spends attackers one at a time, and each removal can reveal a slider
+    /// behind it; check detection wants the king itself off the board so a
+    /// sliding checker does not appear to stop at it.
+    pub fn attackers_to(&self, sq: Square, occupied: Bitboard) -> Bitboard {
+        let queens = self.by_type(PieceType::Queen);
+        (pawn_attacks(Color::Black, sq) & self.pieces(Color::White, PieceType::Pawn))
+            | (pawn_attacks(Color::White, sq) & self.pieces(Color::Black, PieceType::Pawn))
+            | (knight_attacks(sq) & self.by_type(PieceType::Knight))
+            | (king_attacks(sq) & self.by_type(PieceType::King))
+            | (bishop_attacks(sq, occupied) & (self.by_type(PieceType::Bishop) | queens))
+            | (rook_attacks(sq, occupied) & (self.by_type(PieceType::Rook) | queens))
+    }
+
     /// Is the king of `color` currently attacked?
     pub fn in_check(&self, color: Color) -> bool {
         match self.king_square(color) {
