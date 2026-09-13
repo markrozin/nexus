@@ -470,10 +470,18 @@ training is short, capped, and cannot be forgotten about.
    instance remains listed and the charge matches the estimate. If one is still
    listed, destroy it by hand.
 
-Rough cost of one session at about $0.30/hr: 10-15 minutes of setup and builds,
-a few minutes of smoke training and checks, a first 768 net on ~1M positions,
-plus the download window -- on the order of $0.25 to $0.50. The first real
-session will replace these guesses with measured numbers.
+Measured, first session (2026-09-13, RTX 4090 at $0.372/hr): 12 minutes from
+rent to destroy, **$0.07 total**. Almost all of it was boot, upload and the
+CUDA build; training 914K positions for 40 superbatches took **6.7 seconds**
+at 7.3M positions/sec. GPU time is not the constraint at this net size --
+data is. Destroy by hand as soon as the network is downloaded and verified
+rather than waiting out the download window.
+
+Running from the browser: the Jupyter "direct HTTPS" links need vast's root
+certificate installed, which changes browser security settings -- don't. The
+Instance Portal (plain HTTP on the instance IP) lists Cloudflare tunnels with
+normal certificates; use the tunnel for port 8080 for Jupyter, the terminal,
+and uploads through the contents API.
 
 ## Profiles
 
