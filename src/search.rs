@@ -10,10 +10,16 @@
 //! exact — it trades occasional correctness for depth — and did.
 //!
 //! Present: alpha-beta, quiescence, iterative deepening, a transposition table,
-//! SEE/killer/history move ordering, PVS, null move pruning, and late move
-//! reductions.
+//! SEE/killer/history move ordering, PVS, null move pruning, late move
+//! reductions, and reverse futility pruning.
 //!
-//! Not yet present: reverse futility, futility, and late move pruning.
+//! Deliberately absent: **late move pruning**, which skips late quiet moves
+//! outright rather than reducing them. Tested twice and rejected twice, at -80
+//! and (after fixing a real counter bug) -59 Elo. It is the second heuristic to
+//! fail on the same assumption — that quiet move ordering here is good enough
+//! for late quiets to be noise. It is not: history is bonus-only, with no malus
+//! and no continuation tables. Improve quiet ordering before retrying anything
+//! in this family, including demoting losing captures below quiets.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
