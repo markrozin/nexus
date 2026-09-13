@@ -27,3 +27,7 @@
 
 # Trainer crate build output (it is its own workspace)
 /trainer/target
+
+# Local copies of external tools (bullet-utils), and the upload bundle
+/tools
+/dist
