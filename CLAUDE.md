@@ -78,7 +78,7 @@ Perft is the gate.
 | 7 | Zobrist + TT | SPRT pass | done (+28, +121 Elo) |
 | 8 | Move ordering + SEE | SPRT pass, node count drops sharply | done (+60 Elo, -43% nodes) |
 | 9 | SPRT pipeline | gives a verdict on a known-good change | done |
-| 10 | PVS, null move, LMR, futility | SPRT each independently | PVS, null move, LMR done (+166, +87 Elo) |
+| 10 | PVS, null move, LMR, futility | SPRT each independently | PVS, null move, LMR, RFP done (+166, +87, +86) |
 | 11 | Handcrafted eval | SPRT each term | |
 | 12 | Datagen | 100M positions, FENs verify | |
 | 13 | First net | clean loss curve | |
@@ -222,6 +222,12 @@ of a reduction's saving comes from searching less accurately, not just more
 cheaply. Treat a large node drop from a *pruning* change as weaker evidence
 than the same drop from an *ordering* change.
 
+But do not turn that into a quantitative prediction. Reverse futility cut nodes
+only 15-39% at fixed depth, far less than LMR, and measured the same +86 Elo.
+Fixed-depth node counts understate what a pruning change buys at fixed *time*,
+because the engine spends the saving on reaching deeper. Node counts are for
+catching changes that are clearly *worse*; they do not rank the good ones.
+
 
 ### Running it on this machine
 
@@ -272,6 +278,7 @@ W/L/D and pentanomial tallies if you lose the console output anyway.
 | PVS alone (milestone 10) | **no verdict** | 5000 | +6.5 +/- 7.5 |
 | PVS + null move (milestone 10) | H1 accepted | 468 | +166.0 +/- 29.1 |
 | Late move reductions (milestone 10) | H1 accepted | 752 | +86.8 +/- 21.1 |
+| Reverse futility pruning (milestone 10) | H1 accepted | 730 | +86.5 +/- 21.2 |
 
 **A slow verdict means a small effect.** The number of games SPRT needs falls as
 the true gain grows, because the LLR drifts in proportion to how far the effect

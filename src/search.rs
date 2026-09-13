@@ -63,6 +63,16 @@ const MAX_HISTORY: i32 = 16_384;
 /// search is so cheap that the saving does not cover being wrong.
 const NULL_MOVE_MIN_DEPTH: i32 = 3;
 
+/// Reverse futility pruning: margin per ply of remaining depth, and the
+/// deepest depth it applies at.
+///
+/// The margin is the researched starting point (~150 per ply). The depth cap
+/// exists because the assumption gets shakier the more search remains: at high
+/// depth there is plenty of room for the opponent to find the refutation the
+/// static evaluation cannot see.
+const RFP_MARGIN: i32 = 150;
+const RFP_MAX_DEPTH: i32 = 6;
+
 /// Shallowest depth worth reducing at, and how many moves get full depth before
 /// reductions start.
 const LMR_MIN_DEPTH: i32 = 3;
@@ -459,6 +469,31 @@ impl Search {
         // having to move is the whole problem, so "a free pass cannot hurt" is
         // exactly backwards.
         let is_pv = beta - alpha > 1;
+
+        // Reverse futility pruning. If the static evaluation is already so far
+        // above beta that a whole search is unlikely to drag it back down, take
+        // the evaluation and stop.
+        //
+        // This is the mirror of ordinary futility: that one asks whether a move
+        // can rescue a bad position, this asks whether the opponent can spoil a
+        // good one. The margin scales with depth because a deeper search has
+        // more chances to find the refutation.
+        //
+        // Not in a PV node, where an exact value is needed rather than a bound,
+        // and not in check, where the static evaluation is close to meaningless.
+        // Mate scores are excluded because "beta plus a margin" is not a
+        // sensible comparison against a mate bound.
+        if !is_pv
+            && !in_check
+            && depth <= RFP_MAX_DEPTH
+            && beta.abs() < MATE_IN_MAX_PLY
+        {
+            let static_eval = evaluate(pos);
+            if static_eval - RFP_MARGIN * depth >= beta {
+                return static_eval;
+            }
+        }
+
         if !is_pv
             && !in_check
             && depth >= NULL_MOVE_MIN_DEPTH

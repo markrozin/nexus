@@ -1,2 +1,2 @@
-31ea429
-m10b pending commit: + late move reductions (+87 Elo over m10a)
+1b26279
+m10c pending commit: + reverse futility pruning (+86 Elo over m10b)
