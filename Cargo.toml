@@ -74,3 +74,18 @@ required-features = ["bookgen"]
 name = "datagen"
 path = "src/bin/datagen.rs"
 required-features = ["datagen"]
+
+[[bin]]
+name = "datacheck"
+path = "src/bin/datacheck.rs"
+required-features = ["datagen"]
+
+[[bin]]
+name = "datadedup"
+path = "src/bin/datadedup.rs"
+required-features = ["datagen"]
+
+[[bin]]
+name = "netcheck"
+path = "src/bin/netcheck.rs"
+required-features = ["datagen"]

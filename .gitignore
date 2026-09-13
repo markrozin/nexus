@@ -24,3 +24,6 @@
 
 # Generated opening books
 /books/
+
+# Trainer crate build output (it is its own workspace)
+/trainer/target

@@ -1,0 +1,24 @@
+[package]
+name = "newchessbot-trainer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Trains the newchessbot NNUE with bullet. Deliberately outside the engine workspace."
+
+# Its own workspace, on purpose. bullet pulls in a large dependency tree that
+# must never leak into the engine, whose whole dependency list is arrayvec plus
+# criterion. And the engine's release profile uses fat LTO with one codegen
+# unit, which would make every rebuild of bullet painfully slow for no gain.
+[workspace]
+
+[features]
+default = []
+# The GPU backend, for the rented box. Without it bullet trains on the CPU:
+# slow, but free, and exactly how the pipeline is validated before any money
+# is spent.
+cuda = ["bullet_lib/cuda"]
+
+[dependencies]
+# Pinned to the commit whose examples/simple.rs this trainer was adapted from,
+# so the API cannot shift between local validation and the paid run.
+bullet_lib = { git = "https://github.com/jw1912/bullet", rev = "629ee50000b2afb7b3337595401c830d3b1e0f42" }
