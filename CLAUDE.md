@@ -78,7 +78,7 @@ Perft is the gate.
 | 7 | Zobrist + TT | SPRT pass | done (+28, +121 Elo) |
 | 8 | Move ordering + SEE | SPRT pass, node count drops sharply | done (+60 Elo, -43% nodes) |
 | 9 | SPRT pipeline | gives a verdict on a known-good change | done |
-| 10 | PVS, null move, LMR, futility | SPRT each independently | PVS, null move, LMR, RFP done (+166, +87, +86) |
+| 10 | PVS, null move, LMR, futility | SPRT each independently | done (+166, +87, +86; LMP rejected) |
 | 11 | Handcrafted eval | SPRT each term | |
 | 12 | Datagen | 100M positions, FENs verify | |
 | 13 | First net | clean loss curve | |
@@ -279,6 +279,8 @@ W/L/D and pentanomial tallies if you lose the console output anyway.
 | PVS + null move (milestone 10) | H1 accepted | 468 | +166.0 +/- 29.1 |
 | Late move reductions (milestone 10) | H1 accepted | 752 | +86.8 +/- 21.1 |
 | Reverse futility pruning (milestone 10) | H1 accepted | 730 | +86.5 +/- 21.2 |
+| Late move pruning (milestone 10) | **H0 accepted** | 798 | -79.7 +/- 21.6 |
+| Late move pruning, counter bug fixed | **H0 accepted** | 998 | -58.7 +/- 18.1 |
 
 **A slow verdict means a small effect.** The number of games SPRT needs falls as
 the true gain grows, because the LLR drifts in proportion to how far the effect
@@ -297,6 +299,26 @@ and accept a point estimate instead of a decision.
 (An earlier version of this file claimed the opposite -- that effect size did
 not change the game count. That was wrong, and was a rationalisation of one run
 rather than a reading of the data.)
+
+### Quiet move ordering is the binding constraint
+
+Two independent experiments have now failed on the same assumption:
+
+| attempt | result | what it assumed |
+| --- | --- | --- |
+| SEE: losing captures ordered last | 3x worse node count | quiets outrank a forcing move |
+| Late move pruning (twice) | -80, then -59 Elo | late quiets are noise |
+
+Both are standard, both are in the outline, and both lose here. The shared cause
+is that quiet ordering is weak: history is bonus-only, with no malus, no
+continuation history and no counter-move heuristic. Killers plus a single
+bonus-only table is not enough signal to justify skipping quiet moves or ranking
+them above forcing ones.
+
+So the quiet-pruning family is blocked behind quiet-ordering quality. Improve
+history first -- malus on moves that failed to cut, continuation tables -- and
+only then retry late move pruning and the losing-capture demotion. Retrying
+either before that is spending an hour to re-learn this.
 
 ### Background processes
 
