@@ -10,13 +10,13 @@
 //! exact — it trades occasional correctness for depth — and did.
 //!
 //! Present: alpha-beta, quiescence, iterative deepening, a transposition table,
-//! SEE/killer/history move ordering, PVS, and null move pruning.
+//! SEE/killer/history move ordering, PVS, null move pruning, and late move
+//! reductions.
 //!
-//! Not yet present: late move reductions, reverse futility, futility, and late
-//! move pruning.
+//! Not yet present: reverse futility, futility, and late move pruning.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use arrayvec::ArrayVec;
@@ -62,6 +62,30 @@ const MAX_HISTORY: i32 = 16_384;
 /// Shallowest depth worth trying a null move at. Below this the reduced
 /// search is so cheap that the saving does not cover being wrong.
 const NULL_MOVE_MIN_DEPTH: i32 = 3;
+
+/// Shallowest depth worth reducing at, and how many moves get full depth before
+/// reductions start.
+const LMR_MIN_DEPTH: i32 = 3;
+const LMR_MIN_MOVE_INDEX: usize = 3;
+
+/// Square table of reductions, indexed by depth then move-order index.
+const LMR_TABLE_SIZE: usize = 64;
+
+/// `c + ln(depth) * ln(index) / d`, the shape every modern engine uses:
+/// reductions grow with both depth and how late the move is, but
+/// logarithmically, so they stay modest rather than running away. These
+/// constants are Ethereal's for quiet moves — a researched starting point, not
+/// a tuned result for this engine.
+static LMR_TABLE: LazyLock<[[i32; LMR_TABLE_SIZE]; LMR_TABLE_SIZE]> = LazyLock::new(|| {
+    let mut table = [[0i32; LMR_TABLE_SIZE]; LMR_TABLE_SIZE];
+    for depth in 1..LMR_TABLE_SIZE {
+        for index in 1..LMR_TABLE_SIZE {
+            let r = 0.7844 + (depth as f64).ln() * (index as f64).ln() / 2.4696;
+            table[depth][index] = r as i32;
+        }
+    }
+    table
+});
 
 /// How often to consult the clock. Checking every node is measurable.
 const CLOCK_CHECK_INTERVAL: u64 = 2048;
@@ -235,6 +259,39 @@ impl Search {
     #[inline]
     fn history_index(color: Color, mv: Move) -> usize {
         (color.index() * 64 + mv.from().index()) * 64 + mv.to().index()
+    }
+
+    /// How much shallower to search a late move, in plies. Zero means no
+    /// reduction.
+    ///
+    /// Only quiet moves are reduced, and only once past the first few: the
+    /// early ones are where the cutoff is expected, and a capture or promotion
+    /// is forcing enough to be worth full depth. Nothing is reduced while in
+    /// check, where every move is a forced evasion.
+    ///
+    /// A killer is reduced one ply less. It already refuted a sibling at this
+    /// ply, which is direct evidence against it being a late move.
+    fn reduction(&self, depth: i32, index: usize, mv: Move, in_check: bool, ply: usize) -> i32 {
+        if depth < LMR_MIN_DEPTH
+            || index < LMR_MIN_MOVE_INDEX
+            || in_check
+            || mv.is_capture()
+            || mv.is_promotion()
+        {
+            return 0;
+        }
+
+        let table = &*LMR_TABLE;
+        let mut reduction = table[(depth as usize).min(LMR_TABLE_SIZE - 1)]
+            [index.min(LMR_TABLE_SIZE - 1)];
+
+        if self.killers[ply].contains(&mv) {
+            reduction -= 1;
+        }
+
+        // Never reduce into quiescence: that would skip the rest of the tree
+        // rather than search it shallower.
+        reduction.clamp(0, depth - 2)
     }
 
     /// Reward a quiet move that caused a cutoff.
@@ -465,7 +522,21 @@ impl Search {
             let score = if index == 0 {
                 -self.negamax(&child, -beta, -alpha, depth - 1, ply + 1)
             } else {
-                let probe = -self.negamax(&child, -alpha - 1, -alpha, depth - 1, ply + 1);
+                // Late move reduction. A move this far down the ordering is
+                // probably bad, so search it shallower and only pay full price
+                // if it surprises us. This is a gamble: ordering is a guess,
+                // and a reduced search can miss something real.
+                let reduction = self.reduction(depth, index, mv, in_check, ply);
+                let mut probe =
+                    -self.negamax(&child, -alpha - 1, -alpha, depth - 1 - reduction, ply + 1);
+
+                // Beating alpha at reduced depth means the reduction was wrong
+                // about this move; verify it at full depth before believing it.
+                if reduction > 0 && probe > alpha {
+                    probe = -self.negamax(&child, -alpha - 1, -alpha, depth - 1, ply + 1);
+                }
+                // Still beating alpha, and inside the window: the null window
+                // only proved a bound, so a real search is needed for a value.
                 if probe > alpha && probe < beta {
                     -self.negamax(&child, -beta, -alpha, depth - 1, ply + 1)
                 } else {

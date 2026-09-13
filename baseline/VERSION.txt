@@ -1,2 +1,2 @@
-92afa04
-m10a pending commit: + PVS and null move pruning (+166 Elo over m8)
+31ea429
+m10b pending commit: + late move reductions (+87 Elo over m10a)

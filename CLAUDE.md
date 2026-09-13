@@ -23,8 +23,9 @@ The engine is a library (`src/lib.rs`); the binary is only the stdin loop.
 | `see` | static exchange evaluation |
 | `uci` | protocol handler, search worker thread |
 
-Not yet written: NNUE, and the heuristic pruning layer. `go` runs alpha-beta
-with quiescence and a transposition table, to a time or depth limit.
+Not yet written: NNUE, and the futility family. `go` runs alpha-beta with
+quiescence, a transposition table, PVS, null move pruning and late move
+reductions, to a time or depth limit.
 
 ## Correctness
 
@@ -77,7 +78,7 @@ Perft is the gate.
 | 7 | Zobrist + TT | SPRT pass | done (+28, +121 Elo) |
 | 8 | Move ordering + SEE | SPRT pass, node count drops sharply | done (+60 Elo, -43% nodes) |
 | 9 | SPRT pipeline | gives a verdict on a known-good change | done |
-| 10 | PVS, null move, LMR, futility | SPRT each independently | PVS + null move done (+166 Elo) |
+| 10 | PVS, null move, LMR, futility | SPRT each independently | PVS, null move, LMR done (+166, +87 Elo) |
 | 11 | Handcrafted eval | SPRT each term | |
 | 12 | Datagen | 100M positions, FENs verify | |
 | 13 | First net | clean loss curve | |
@@ -215,6 +216,12 @@ Compare wall-clock, not just nodes: SEE ordering cut nodes 43% but also cost 13%
 of nps, and only the product matters. Node count is a proxy; the SPRT is still
 the gate.
 
+And node counts flatter pruning heuristics specifically. LMR cut nodes ~14x
+against null move's ~6-10x, yet measured +87 Elo against null move's +166: some
+of a reduction's saving comes from searching less accurately, not just more
+cheaply. Treat a large node drop from a *pruning* change as weaker evidence
+than the same drop from an *ordering* change.
+
 
 ### Running it on this machine
 
@@ -264,6 +271,7 @@ W/L/D and pentanomial tallies if you lose the console output anyway.
 | Move ordering: SEE, killers, history (milestone 8) | H1 accepted | 1084 | +60.2 +/- 18.0 |
 | PVS alone (milestone 10) | **no verdict** | 5000 | +6.5 +/- 7.5 |
 | PVS + null move (milestone 10) | H1 accepted | 468 | +166.0 +/- 29.1 |
+| Late move reductions (milestone 10) | H1 accepted | 752 | +86.8 +/- 21.1 |
 
 **A slow verdict means a small effect.** The number of games SPRT needs falls as
 the true gain grows, because the LLR drifts in proportion to how far the effect
