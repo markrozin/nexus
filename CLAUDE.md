@@ -430,6 +430,51 @@ Consequences worth knowing before planning any long run:
   rented 32-64 core box. Datagen is embarrassingly parallel, so the CPU rental
   buys more than the GPU rental does.
 
+## Rental guardrails
+
+The budget for all NNUE training is **$15**. These rules exist so that money is
+spent computing, not waiting or debugging.
+
+What the platform does, stated plainly: vast.ai bills an instance from the
+moment it starts until it is **destroyed**. Setup is billed exactly like
+training. A *stopped* instance still bills for disk, and bandwidth is billed per
+byte in every state. So "only pay while the model trains" is not something any
+script can guarantee. What is guaranteed instead is that time not spent
+training is short, capped, and cannot be forgotten about.
+
+1. **Never rent before `trainer/vast/prepare.sh` prints PREFLIGHT PASSED.** It
+   processes and validates the data, confirms the trainer and engine build
+   against their lockfiles, checks the scripts are LF and parse, and builds and
+   re-verifies the upload bundle. Everything that can fail without a GPU fails
+   here, for free.
+2. **Fail fast on the instance.** `run.sh` checks the GPU, the exact CUDA
+   libraries bullet links, the self-destroy key, and the budget before
+   installing Rust or compiling anything.
+3. **Hard spending cap.** `run.sh` requires `PRICE_PER_HOUR` and caps instance
+   time at `MAX_DOLLARS / PRICE_PER_HOUR` hours (default `MAX_DOLLARS=3`),
+   enforced with `timeout`, with the download window reserved inside the cap.
+   Boot and upload time before the script starts is billed but not counted, so
+   start it promptly.
+4. **The instance destroys itself.** vast.ai injects `CONTAINER_ID` and a
+   `CONTAINER_API_KEY` scoped to starting, stopping or destroying only that
+   instance, so no account key ever goes on the box. On any exit -- success,
+   failure, cap reached, or a dropped SSH session -- `run.sh` destroys the
+   instance after a download window: 15 minutes on success, 5 on failure.
+   Destroy, never stop. The only opt-out is deliberate:
+   `touch /tmp/KEEP_INSTANCE`. `run.sh` refuses to start at all if
+   self-destroy is unavailable, unless `NO_AUTODESTROY=1` is set on purpose.
+5. **Validate before the expensive step.** A smoke train on 16K verified
+   positions, then an on-box `netcheck`, must pass before the real training run
+   starts. A perspective bug costs cents to find, not dollars.
+6. **Check the bill afterwards.** Confirm in the vast.ai console that no
+   instance remains listed and the charge matches the estimate. If one is still
+   listed, destroy it by hand.
+
+Rough cost of one session at about $0.30/hr: 10-15 minutes of setup and builds,
+a few minutes of smoke training and checks, a first 768 net on ~1M positions,
+plus the download window -- on the order of $0.25 to $0.50. The first real
+session will replace these guesses with measured numbers.
+
 ## Profiles
 
 - `cargo build --release` — `lto = "fat"`, `codegen-units = 1`,
