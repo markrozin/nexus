@@ -22,6 +22,7 @@ pub mod eval;
 pub mod magic;
 mod magic_constants;
 pub mod movegen;
+pub mod nnue;
 pub mod rng;
 pub mod search;
 pub mod see;

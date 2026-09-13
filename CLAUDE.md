@@ -378,6 +378,12 @@ contradicts the original outline is a deliberate correction.
   centipawns. Deduplicate, or the net overfits.
 - Fixed nodes, not fixed depth, so data is hardware-independent. About 5k nodes
   per position, 7 or 8 random opening plies, discard openings already lopsided.
+- End a datagen game on insufficient material. Bare kings score a flat draw,
+  pass the quiet filter, and would otherwise be recorded all the way to the
+  fifty-move rule. bullet `validate` flagged 112 of them in a 16K sample before
+  the check existed. Run `validate` on every converted file, and shuffle before
+  training: datagen writes whole games in sequence, so unshuffled batches are
+  dozens of near-identical positions from one game.
 
 ### Scale, honestly
 
@@ -413,6 +419,12 @@ Consequences worth knowing before planning any long run:
   20-hour job.
 - **`bullet` cannot train here.** It needs CUDA, ROCm or Metal. Training a first
   768 net is under an hour on almost any rented GPU, so rent for that step.
+- Beware: bullet *compiles* fine with no GPU backend, which is a trap. That build
+  runs on a mock runtime that panics at the first gradient ("This is a mock
+  runtime! It can not actually do anything!"). A clean build here proves the
+  trainer matches the bullet API, not that it trains. An earlier plan to
+  smoke-train locally for free rested on the compile succeeding; the first real
+  training run has to happen on the rental.
 - Datagen is the job this machine is worst at: 100M positions at 5k nodes is
   roughly 5e11 nodes, which is **15-25 hours here**, against under two on a
   rented 32-64 core box. Datagen is embarrassingly parallel, so the CPU rental

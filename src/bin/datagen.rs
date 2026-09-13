@@ -243,6 +243,15 @@ impl Worker {
             if pos.halfmove_clock() >= 100 {
                 break;
             }
+            // Bare kings, or a lone minor, cannot be won. Stop here rather than
+            // shuffle toward the fifty-move rule recording dozens of dead
+            // positions: they score a flat draw, sail through the quiet filter,
+            // and teach the network nothing. bullet's validator flagged 112 of
+            // them in a 16K-position sample before this check existed.
+            if newchessbot::search::is_insufficient_material(&pos) {
+                result = 0.5;
+                break;
+            }
 
             self.search.set_game_history(&keys);
             let outcome = self.search.run(&pos, self.limits(), &mut |_| {});
@@ -302,17 +311,12 @@ impl Worker {
         if (static_score - search_score).abs() > QUIET_MARGIN_SEARCH {
             return false;
         }
-        // A depth-1 search is quiescence plus one layer, which is the cheapest
-        // stand-in for the qsearch-only comparison the margin was tuned against.
-        let quiet_probe = self.search.run(
-            pos,
-            SearchLimits {
-                max_depth: Some(1),
-                ..Default::default()
-            },
-            &mut |_| {},
-        );
-        (static_score - quiet_probe.score).abs() <= QUIET_MARGIN_QSEARCH
+        // The comparison the margin was tuned against is static eval versus
+        // quiescence, so use quiescence itself -- not a depth-1 `run`, which
+        // would also halve history and bump the table generation once per
+        // position and quietly degrade every search after it.
+        let quiet = self.search.quiescence_score(pos);
+        (static_score - quiet).abs() <= QUIET_MARGIN_QSEARCH
     }
 
     /// Play [`RANDOM_PLIES`] random legal moves, rejecting an opening that is

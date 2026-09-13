@@ -272,6 +272,25 @@ impl Search {
         self.nodes
     }
 
+    /// Full-window quiescence score for `pos`, side-to-move relative.
+    ///
+    /// For data generation, which compares static eval against quiescence to
+    /// decide whether a position is quiet enough to label. Deliberately not
+    /// `run`: that halves history and bumps the table generation, which would
+    /// degrade every search that follows if called once per position.
+    ///
+    /// Clears the abort state first. A node-limited search immediately before
+    /// leaves `aborted` set, and quiescence would otherwise return a draw
+    /// without searching anything.
+    pub fn quiescence_score(&mut self, pos: &Position) -> i32 {
+        self.aborted = false;
+        // With the first iteration marked incomplete, `check_abort` never
+        // consults the clock or the node limit.
+        self.first_iteration_done = false;
+        self.nodes = 0;
+        self.quiescence(pos, -INFINITY, INFINITY, 0)
+    }
+
     #[inline]
     fn history_index(color: Color, mv: Move) -> usize {
         (color.index() * 64 + mv.from().index()) * 64 + mv.to().index()
@@ -760,7 +779,7 @@ fn has_non_pawn_material(pos: &Position, color: Color) -> bool {
 ///
 /// Without this the engine happily "wins" a bishop ending it cannot possibly
 /// convert. Insufficient-material pairs like KNN vs K are not covered.
-fn is_insufficient_material(pos: &Position) -> bool {
+pub fn is_insufficient_material(pos: &Position) -> bool {
     if pos.by_type(PieceType::Pawn).any()
         || pos.by_type(PieceType::Rook).any()
         || pos.by_type(PieceType::Queen).any()
