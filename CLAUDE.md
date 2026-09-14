@@ -438,7 +438,10 @@ data volume is CPU-bound, not GPU-bound.
   Stockfish's judgement, TCEC's NNUE guideline asks for data from the engine's
   own search or eval, and much of the engine community frowns on training on
   another engine's output. Our own self-play data remains the fallback if
-  originality ever matters. Caveats for the converter: no game results (train
+  originality ever matters. In practice it is read from the deduplicated
+  Hugging Face mirror `mateuszgrzyb/lichess-stockfish-normalized` (316M
+  positions, deepest eval each, CC BY 4.0 over the Lichess CC0 data): credit
+  it, and Lichess, wherever a network trained on it is published. Caveats for the converter: no game results (train
   at WDL 0.0), positions skew toward human analysis rather than self-play, and
   nothing is quiet-filtered.
 
