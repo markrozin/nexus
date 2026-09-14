@@ -38,9 +38,24 @@
 //! recorded search scores. Validate it that way before trusting a net.
 
 use std::path::Path;
+use std::sync::LazyLock;
 
 use crate::board::Position;
 use crate::types::{Color, Piece, Square};
+
+/// The network compiled into the binary, so the engine plays at full strength
+/// with no files beside it. Replace `networks/default.bin` to ship a new net;
+/// the loader's size check fails the build-time test if its shape is wrong.
+static EMBEDDED_BYTES: &[u8] = include_bytes!("../networks/default.bin");
+
+static EMBEDDED: LazyLock<Network> = LazyLock::new(|| {
+    Network::from_bytes(EMBEDDED_BYTES).expect("networks/default.bin matches HIDDEN")
+});
+
+/// The embedded network, parsed once on first use.
+pub fn embedded() -> &'static Network {
+    &EMBEDDED
+}
 
 pub const INPUTS: usize = 768;
 
@@ -465,6 +480,31 @@ mod tests {
             acc.update(&net, &pos, &next);
             assert_eq!(acc, Accumulator::refresh(&next, &net), "{uci} in {fen}");
         }
+    }
+
+    #[test]
+    fn the_embedded_network_loads_and_behaves_like_a_chess_evaluation() {
+        // A trained net, not a synthetic one: the start position is level, and
+        // being a queen up is clearly good for the side that has it.
+        let net = embedded();
+        let start = net.evaluate_position(&Position::startpos());
+        assert!(start.abs() < 100, "start position scored {start}");
+
+        let queen_up: Position = "rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+            .parse()
+            .unwrap();
+        let score = net.evaluate_position(&queen_up);
+        assert!(score > 400, "a queen up scored {score}");
+        // The mirror swaps colours *and* the side to move, so the side to move is
+        // still the one a queen up: same score, not the negation.
+        let mirrored: Position = mirror(&queen_up.to_fen()).parse().unwrap();
+        assert_eq!(net.evaluate_position(&mirrored), score, "colour mirror");
+        // Hand the move to the side a queen down instead, and it must be bad.
+        let other_to_move: Position = "rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1"
+            .parse()
+            .unwrap();
+        let down = net.evaluate_position(&other_to_move);
+        assert!(down < -400, "a queen down scored {down}");
     }
 
     #[test]

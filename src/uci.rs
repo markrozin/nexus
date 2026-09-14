@@ -19,7 +19,8 @@ use std::time::Duration;
 
 use crate::board::Position;
 use crate::movegen::generate_legal;
-use crate::search::{score_to_uci, IterationInfo, Search, SearchLimits};
+use crate::nnue::{self, Network};
+use crate::search::{score_to_uci, Evaluator, IterationInfo, Search, SearchLimits};
 use crate::tt::TranspositionTable;
 use crate::types::Color;
 
@@ -221,7 +222,15 @@ pub struct Uci<W: Sink> {
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     options: Options,
+    /// Leaf evaluation for every search, chosen by `EvalFile`.
+    evaluator: Evaluator,
 }
+
+/// `EvalFile` values that name an evaluator rather than a file: the
+/// handcrafted evaluation (the default, until a network passes an SPRT), and
+/// the network compiled into the binary.
+const HANDCRAFTED_EVAL_FILE: &str = "<handcrafted>";
+const EMBEDDED_EVAL_FILE: &str = "<embedded>";
 
 impl Uci<StdoutSink> {
     /// A handler wired to real stdout with an entropy-seeded PRNG.
@@ -240,6 +249,7 @@ impl<W: Sink> Uci<W> {
             stop: Arc::new(AtomicBool::new(false)),
             worker: None,
             options: Options::default(),
+            evaluator: Evaluator::Handcrafted,
         }
     }
 
@@ -331,6 +341,9 @@ impl<W: Sink> Uci<W> {
             Options::THREADS_MIN,
             Options::THREADS_MAX
         ))?;
+        self.send(&format!(
+            "option name EvalFile type string default {HANDCRAFTED_EVAL_FILE}"
+        ))?;
         self.send("uciok")
     }
 
@@ -361,6 +374,21 @@ impl<W: Sink> Uci<W> {
                 Ok(v) => self.options.threads = v.clamp(Options::THREADS_MIN, Options::THREADS_MAX),
                 Err(_) => return self.send(&format!("info string bad Threads value {value:?}")),
             },
+            "evalfile" => {
+                if value.is_empty() || value == HANDCRAFTED_EVAL_FILE {
+                    self.evaluator = Evaluator::Handcrafted;
+                } else if value == EMBEDDED_EVAL_FILE {
+                    self.evaluator = Evaluator::Nnue(nnue::embedded());
+                } else {
+                    match Network::load(std::path::Path::new(&value)) {
+                        // Leaked on purpose: the search holds `&'static`, and a
+                        // GUI sets this once per session, not once per move.
+                        Ok(net) => self.evaluator = Evaluator::Nnue(Box::leak(Box::new(net))),
+                        // Keep the previous network rather than play without one.
+                        Err(e) => return self.send(&format!("info string EvalFile {value:?}: {e}")),
+                    }
+                }
+            }
             _ => return self.send(&format!("info string unknown option {name:?}")),
         }
         Ok(())
@@ -413,11 +441,11 @@ impl<W: Sink> Uci<W> {
         let tt = Arc::clone(&self.tt);
         let stop = Arc::clone(&self.stop);
         let out = self.out.clone();
-
+        let evaluator = self.evaluator;
 
         stop.store(false, Ordering::Relaxed);
         self.worker = Some(thread::spawn(move || {
-            run_search(position, &history, limits, stop, tt, out);
+            run_search(position, &history, limits, stop, tt, evaluator, out);
         }));
         Ok(())
     }
@@ -455,6 +483,7 @@ fn run_search<W: Sink>(
     limits: Limits,
     stop: Arc<AtomicBool>,
     tt: Arc<TranspositionTable>,
+    evaluator: Evaluator,
     mut out: W,
 ) {
     let search_limits = SearchLimits {
@@ -465,6 +494,7 @@ fn run_search<W: Sink>(
 
     let hashfull = Arc::clone(&tt);
     let mut search = Search::with_table(stop, tt);
+    search.set_evaluator(evaluator);
     search.set_game_history(history);
     let result = search.run(&pos, search_limits, &mut |info| {
         report_iteration(&mut out, info, hashfull.permille_full());
@@ -531,6 +561,7 @@ mod tests {
                 format!("id author {ENGINE_AUTHOR}"),
                 "option name Hash type spin default 16 min 1 max 1024".to_string(),
                 "option name Threads type spin default 1 min 1 max 1024".to_string(),
+                "option name EvalFile type string default <handcrafted>".to_string(),
                 "uciok".to_string(),
                 "readyok".to_string(),
             ]
@@ -559,7 +590,7 @@ mod tests {
         ));
 
         assert_eq!(lines[0], id_line());
-        assert_eq!(lines[4], "uciok");
+        assert_eq!(lines[5], "uciok");
         assert_eq!(lines.iter().filter(|l| *l == "readyok").count(), 2);
         assert!(
             !lines.iter().any(|l| l.contains("unknown option")),
@@ -650,6 +681,21 @@ mod tests {
         assert_eq!(uci.options().hash_mb, Options::HASH_MIN);
         uci.handle("setoption name Threads value 0").unwrap();
         assert_eq!(uci.options().threads, Options::THREADS_MIN);
+    }
+
+    #[test]
+    fn a_bad_eval_file_is_reported_and_the_engine_still_plays() {
+        let buf = SharedBuffer::new();
+        {
+            let mut uci = Uci::new(buf.clone());
+            uci.handle("setoption name EvalFile value no/such/network.bin").unwrap();
+            uci.handle("setoption name EvalFile value <embedded>").unwrap();
+            uci.handle("go depth 2").unwrap();
+            uci.handle("stop").unwrap();
+        }
+        let out = buf.contents();
+        assert!(out.contains("info string EvalFile \"no/such/network.bin\""), "{out}");
+        assert!(out.contains("bestmove "), "{out}");
     }
 
     #[test]
