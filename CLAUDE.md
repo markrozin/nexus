@@ -22,10 +22,22 @@ The engine is a library (`src/lib.rs`); the binary is only the stdin loop.
 | `tt` | transposition table, lock-free via relaxed atomics |
 | `see` | static exchange evaluation |
 | `uci` | protocol handler, search worker thread |
+| `nnue` | network loader, accumulators, inference; the embedded net |
 
-Not yet written: NNUE, and the futility family. `go` runs alpha-beta with
-quiescence, a transposition table, PVS, null move pruning and late move
-reductions, to a time or depth limit.
+`go` runs alpha-beta with quiescence, a transposition table, PVS, null move
+pruning, late move reductions and reverse futility pruning, to a time or depth
+limit, evaluating leaves with the handcrafted evaluation by default.
+
+NNUE inference is wired in but opt-in until a network passes an SPRT against
+the handcrafted evaluation: `setoption name EvalFile value <embedded>` uses the
+net compiled in from `networks/default.bin`, a path loads any other net without
+rebuilding (which is how candidate nets get tested), and `<handcrafted>` is the
+default. Flip the default in `Search::with_table` and `Uci::new` only on a
+passing SPRT.
+
+The handcrafted `eval` stays. Datagen and bookgen pin it explicitly
+(`Evaluator::Handcrafted`): datagen's quiet filter and `datacheck` compare
+against it, and moving datagen to the network means changing those together.
 
 ## Correctness
 
@@ -281,6 +293,15 @@ W/L/D and pentanomial tallies if you lose the console output anyway.
 | Reverse futility pruning (milestone 10) | H1 accepted | 730 | +86.5 +/- 21.2 |
 | Late move pruning (milestone 10) | **H0 accepted** | 798 | -79.7 +/- 21.6 |
 | Late move pruning, counter bug fixed | **H0 accepted** | 998 | -58.7 +/- 18.1 |
+| First NNUE (128x2, 915K HCE-labelled positions) vs m10c | **H0 accepted** | 322 | -385.9 +/- 61.9 |
+| Same net at fixed 20K nodes/move (removes the nps gap) | 13-83-4 | 100 | about -300 |
+
+The first network is not a bug: accumulators match a refresh through real
+searches, material values are sane, and it tracks held-out labels (r 0.915) as
+well as training ones (0.90), so it is not overfitting either. It is an
+imperfect copy of the handcrafted evaluation it was labelled by, at half the
+nps. A net only beats its teacher once enough game-result signal (hundreds of
+millions of positions) or better labels outweigh the imitation.
 
 **A slow verdict means a small effect.** The number of games SPRT needs falls as
 the true gain grows, because the LLR drifts in proportion to how far the effect

@@ -51,7 +51,7 @@ use newchessbot::board::Position;
 use newchessbot::eval::evaluate;
 use newchessbot::movegen::generate_legal;
 use newchessbot::rng::Rng;
-use newchessbot::search::{Search, SearchLimits, MATE_IN_MAX_PLY};
+use newchessbot::search::{Evaluator, Search, SearchLimits, MATE_IN_MAX_PLY};
 use newchessbot::types::Color;
 
 /// Fixed node budget per move.
@@ -201,9 +201,14 @@ struct Worker {
 
 impl Worker {
     fn new(seed: u64) -> Self {
+        let mut search = Search::new(Arc::new(AtomicBool::new(false)));
+        // The quiet filter compares the handcrafted static evaluation against
+        // this search's scores, so both have to come from the same evaluator.
+        // Moving datagen to the network means changing the filter with it.
+        search.set_evaluator(Evaluator::Handcrafted);
         Self {
             rng: Rng::new(seed),
-            search: Search::new(Arc::new(AtomicBool::new(false))),
+            search,
         }
     }
 

@@ -29,6 +29,7 @@ use arrayvec::ArrayVec;
 
 use crate::board::Position;
 use crate::eval::{evaluate, params};
+use crate::nnue::{self, Accumulator, Network};
 use crate::movegen::{generate_legal, generate_tactical, MoveList};
 use crate::see::see;
 use crate::tt::{Bound, TranspositionTable};
@@ -176,6 +177,20 @@ impl PvTable {
     }
 }
 
+/// Largest static evaluation the search will use. A network can in principle
+/// output anything; clamping keeps every evaluation clear of the mate band, so
+/// no evaluation is ever mistaken for a mate score.
+const MAX_EVAL: i32 = MATE_IN_MAX_PLY - 1;
+
+/// Which static evaluation the search calls at its leaves.
+#[derive(Clone, Copy)]
+pub enum Evaluator {
+    /// Material and piece-square tables (`eval`).
+    Handcrafted,
+    /// A network, kept up to date incrementally along the search path.
+    Nnue(&'static Network),
+}
+
 pub struct Search {
     pv: PvTable,
     nodes: u64,
@@ -209,6 +224,15 @@ pub struct Search {
     /// Set once the search has run out of time or been told to stop. Everything
     /// unwinds by returning normally; see [`Search::aborted`].
     aborted: bool,
+    evaluator: Evaluator,
+    /// One accumulator per ply: `accumulators[ply]` describes the position
+    /// being searched at `ply`. Allocated once. A child copies its parent's and
+    /// applies the move, so returning up the tree needs no undo -- the parent's
+    /// entry was never touched. Unused under the handcrafted evaluator.
+    accumulators: Box<[Accumulator]>,
+    /// Tests only: check every network evaluation against a full refresh.
+    #[cfg(test)]
+    verify_accumulators: bool,
 }
 
 impl Search {
@@ -233,6 +257,60 @@ impl Search {
             null_move_allowed: true,
             first_iteration_done: false,
             aborted: false,
+            // Handcrafted until a network passes an SPRT against it. The first
+            // one lost by 386 Elo; see the results table in CLAUDE.md.
+            evaluator: Evaluator::Handcrafted,
+            accumulators: vec![
+                Accumulator::refresh(&Position::startpos(), nnue::embedded());
+                MAX_PLY
+            ]
+            .into_boxed_slice(),
+            #[cfg(test)]
+            verify_accumulators: false,
+        }
+    }
+
+    /// Choose the leaf evaluation. Defaults to the handcrafted evaluation.
+    pub fn set_evaluator(&mut self, evaluator: Evaluator) {
+        self.evaluator = evaluator;
+    }
+
+    /// Static evaluation of the position at `ply`, side-to-move relative.
+    #[inline]
+    fn static_eval(&self, pos: &Position, ply: usize) -> i32 {
+        match self.evaluator {
+            Evaluator::Handcrafted => evaluate(pos),
+            Evaluator::Nnue(net) => {
+                #[cfg(test)]
+                if self.verify_accumulators {
+                    assert_eq!(
+                        self.accumulators[ply],
+                        Accumulator::refresh(pos, net),
+                        "accumulator drift at ply {ply} in {}",
+                        pos.to_fen()
+                    );
+                }
+                net.evaluate(&self.accumulators[ply], pos.side_to_move())
+                    .clamp(-MAX_EVAL, MAX_EVAL)
+            }
+        }
+    }
+
+    /// Build the root accumulator from scratch. Every search entry point calls
+    /// this before evaluating anything.
+    fn refresh_root(&mut self, pos: &Position) {
+        if let Evaluator::Nnue(net) = self.evaluator {
+            self.accumulators[0] = Accumulator::refresh(pos, net);
+        }
+    }
+
+    /// Derive the accumulator for `child`, reached from `parent` at `ply`.
+    #[inline]
+    fn push_accumulator(&mut self, parent: &Position, child: &Position, ply: usize) {
+        if let Evaluator::Nnue(net) = self.evaluator {
+            let (done, rest) = self.accumulators.split_at_mut(ply + 1);
+            rest[0] = done[ply];
+            rest[0].update(net, parent, child);
         }
     }
 
@@ -288,6 +366,7 @@ impl Search {
         // consults the clock or the node limit.
         self.first_iteration_done = false;
         self.nodes = 0;
+        self.refresh_root(pos);
         self.quiescence(pos, -INFINITY, INFINITY, 0)
     }
 
@@ -394,6 +473,7 @@ impl Search {
         if root_moves.is_empty() {
             return result;
         }
+        self.refresh_root(pos);
 
         let max_depth = limits.max_depth.unwrap_or(MAX_PLY as u32 - 1);
         for depth in 1..=max_depth.min(MAX_PLY as u32 - 1) {
@@ -444,7 +524,7 @@ impl Search {
             return DRAW; // discarded by the caller
         }
         if ply >= MAX_PLY - 1 {
-            return evaluate(pos);
+            return self.static_eval(pos, ply);
         }
         // The fifty-move rule is a draw wherever it lands, but never claim one
         // at the root: the caller needs a move back.
@@ -513,7 +593,7 @@ impl Search {
             && depth <= RFP_MAX_DEPTH
             && beta.abs() < MATE_IN_MAX_PLY
         {
-            let static_eval = evaluate(pos);
+            let static_eval = self.static_eval(pos, ply);
             if static_eval - RFP_MARGIN * depth >= beta {
                 return static_eval;
             }
@@ -527,6 +607,8 @@ impl Search {
         {
             let reduction = 3 + depth / 6;
             let child = pos.make_null_move();
+            // No piece moved, so the child's accumulator is the parent's.
+            self.accumulators[ply + 1] = self.accumulators[ply];
             self.null_move_allowed = false;
             let score = -self.negamax(&child, -beta, -beta + 1, depth - reduction - 1, ply + 1);
             self.null_move_allowed = true;
@@ -572,6 +654,7 @@ impl Search {
         for (index, mv) in moves.into_iter().enumerate() {
             self.nodes += 1;
             let child = pos.make_move(mv);
+            self.push_accumulator(pos, &child, ply);
 
             // Principal variation search. Ordering is good enough that the
             // first move is usually best, so every later move is first probed
@@ -663,10 +746,10 @@ impl Search {
             return DRAW;
         }
         if ply >= MAX_PLY - 1 {
-            return evaluate(pos);
+            return self.static_eval(pos, ply);
         }
 
-        let stand_pat = evaluate(pos);
+        let stand_pat = self.static_eval(pos, ply);
         if stand_pat >= beta {
             return stand_pat;
         }
@@ -700,6 +783,7 @@ impl Search {
         for mv in moves {
             self.nodes += 1;
             let child = pos.make_move(mv);
+            self.push_accumulator(pos, &child, ply);
             let score = -self.quiescence(&child, -beta, -alpha, ply + 1);
             if self.aborted {
                 return DRAW;
@@ -984,9 +1068,11 @@ mod tests {
     fn quiescence_returns_the_stand_pat_when_every_capture_loses() {
         let pos: Position = POISONED.parse().unwrap();
         let mut search = Search::new(Arc::new(AtomicBool::new(false)));
+        search.set_evaluator(Evaluator::Handcrafted);
         let score = search.quiescence(&pos, -INFINITY, INFINITY, 0);
         // Not obliged to capture, so a position whose only capture is bad is
-        // worth exactly its static evaluation.
+        // worth exactly its static evaluation. Handcrafted, because whether a
+        // capture "loses" is a claim about that evaluation specifically.
         assert_eq!(score, evaluate(&pos));
     }
 
@@ -994,6 +1080,7 @@ mod tests {
     fn quiescence_takes_a_free_piece() {
         let pos: Position = FREE_PAWN.parse().unwrap();
         let mut search = Search::new(Arc::new(AtomicBool::new(false)));
+        search.set_evaluator(Evaluator::Handcrafted);
         let score = search.quiescence(&pos, -INFINITY, INFINITY, 0);
         assert!(
             score > evaluate(&pos),
@@ -1010,7 +1097,7 @@ mod tests {
             .parse()
             .unwrap();
         let mut search = Search::new(Arc::new(AtomicBool::new(false)));
-        let score = search.quiescence(&pos, -INFINITY, INFINITY, 0);
+        let score = search.quiescence_score(&pos);
         assert!(score.abs() < MATE_IN_MAX_PLY);
         assert!(search.nodes() > 0);
     }
@@ -1028,10 +1115,42 @@ mod tests {
             "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
         ] {
             let pos: Position = fen.parse().unwrap();
+            for evaluator in [Evaluator::Handcrafted, Evaluator::Nnue(nnue::embedded())] {
+                let mut search = Search::new(Arc::new(AtomicBool::new(false)));
+                search.set_evaluator(evaluator);
+                search.refresh_root(&pos);
+                let ab = search.negamax(&pos, -INFINITY, INFINITY, 2, 0);
+                let plain = minimax(&mut search, &pos, 2, 0);
+                assert_eq!(ab, plain, "{fen}");
+            }
+        }
+    }
+
+    #[test]
+    fn accumulators_stay_in_sync_through_a_real_search() {
+        // Every network evaluation inside a real search -- with null moves,
+        // reductions, re-searches and quiescence all unwinding in different
+        // orders -- is checked against a from-scratch refresh. Positions cover
+        // castling, en passant and promotion.
+        for fen in [
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3",
+            "n1n5/PPPk4/8/8/8/8/4Kppp/5N1N b - - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        ] {
+            let pos: Position = fen.parse().unwrap();
             let mut search = Search::new(Arc::new(AtomicBool::new(false)));
-            let ab = search.negamax(&pos, -INFINITY, INFINITY, 2, 0);
-            let plain = minimax(&mut search, &pos, 2, 0);
-            assert_eq!(ab, plain, "{fen}");
+            search.set_evaluator(Evaluator::Nnue(nnue::embedded()));
+            search.verify_accumulators = true;
+            let result = search.run(
+                &pos,
+                SearchLimits {
+                    max_depth: Some(4),
+                    ..Default::default()
+                },
+                &mut |_| {},
+            );
+            assert!(result.nodes > 0, "{fen}");
         }
     }
 
@@ -1059,7 +1178,9 @@ mod tests {
         }
         let mut best = -INFINITY;
         for mv in moves {
-            best = best.max(-minimax(search, &pos.make_move(mv), depth - 1, ply + 1));
+            let child = pos.make_move(mv);
+            search.push_accumulator(pos, &child, ply);
+            best = best.max(-minimax(search, &child, depth - 1, ply + 1));
         }
         best
     }

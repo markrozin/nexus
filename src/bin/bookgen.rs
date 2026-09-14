@@ -25,7 +25,7 @@ use std::sync::Arc;
 use newchessbot::board::Position;
 use newchessbot::movegen::generate_legal;
 use newchessbot::rng::Rng;
-use newchessbot::search::{Search, SearchLimits};
+use newchessbot::search::{Evaluator, Search, SearchLimits};
 
 /// Random plies played out of the start position.
 const OPENING_PLIES: usize = 8;
@@ -43,6 +43,9 @@ fn main() {
 
     let mut rng = Rng::new(0x00B0_0C00_0000_0001);
     let mut search = Search::new(Arc::new(AtomicBool::new(false)));
+    // Handcrafted, so the book depends only on this file and not on whichever
+    // network happens to be embedded when it is regenerated.
+    search.set_evaluator(Evaluator::Handcrafted);
     let limits = SearchLimits {
         max_depth: Some(FILTER_DEPTH),
         ..Default::default()
