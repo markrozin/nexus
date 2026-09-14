@@ -516,8 +516,15 @@ rather than waiting out the download window.
 
 Lichess sessions (`prepare.sh --lichess`, then `run.sh lichess`) download the
 database on the instance, so rent with at least 100 GB of disk and a fast
-connection, and set `MAX_DOLLARS` for a multi-hour run: streaming and
-converting ~410M lines single-threaded is the long pole, not training.
+connection, and set `MAX_DOLLARS` for a multi-hour run.
+
+**Do not stream from database.lichess.org.** Session 2 (2026-09-13) failed
+after 19 minutes: the server closed the connection mid-transfer (curl exit 18)
+after ~190 MB, and a separate test measured it at ~170 KB/s, i.e. ~36 hours for
+the 22 GB file. The guardrails worked -- the instance destroyed itself and the
+session cost ~$0.13 -- but the source is unusable at this size. The same CC0
+data is mirrored on Hugging Face (`Lichess/chess-position-evaluations`,
+parquet), served from a CDN.
 
 Running from the browser: the Jupyter "direct HTTPS" links need vast's root
 certificate installed, which changes browser security settings -- don't. The
