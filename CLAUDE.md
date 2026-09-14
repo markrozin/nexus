@@ -432,9 +432,15 @@ data volume is CPU-bound, not GPU-bound.
   drift, and it gets the same treatment.
 - Every SIMD path keeps its scalar twin, plus a test asserting the two agree bit
   for bit.
-- **Generate our own training data.** Training on networks or output produced by
-  another engine raises derived-work questions and is barred by many rating
-  lists.
+- **Training data source: the Lichess evaluation database (decided 2026-09-13).**
+  ~410M positions evaluated by Stockfish in users' browsers, CC0, so legally
+  unrestricted. The trade-off was taken knowingly: a net trained on it learns
+  Stockfish's judgement, TCEC's NNUE guideline asks for data from the engine's
+  own search or eval, and much of the engine community frowns on training on
+  another engine's output. Our own self-play data remains the fallback if
+  originality ever matters. Caveats for the converter: no game results (train
+  at WDL 0.0), positions skew toward human analysis rather than self-play, and
+  nothing is quiet-filtered.
 
 ## Hardware
 
@@ -531,8 +537,11 @@ and uploads through the contents API.
 
 ## Dependencies
 
-Keep them minimal. Current set: `arrayvec` (move lists) and `criterion`
-(dev-only, benchmarks). That is the whole list.
+Keep them minimal. Current set: `arrayvec` (move lists), `criterion`
+(dev-only, benchmarks), and `ruzstd` (optional, behind `datagen` only: decodes
+the Lichess evaluation database for `lichesseval`, in pure Rust so it builds on
+a bare rental). That is the whole list, and the engine build itself still
+depends on `arrayvec` alone.
 
 `rayon` was dropped: datagen parallelises with `std::thread::scope`, one
 independent worker per thread with nothing shared, so the dependency bought

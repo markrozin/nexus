@@ -32,8 +32,9 @@ harness = false
 
 [features]
 default = []
-# Self-play data generation for NNUE training. Not part of any engine build.
-datagen = []
+# Training-data tools: self-play generation, checks, and the Lichess converter.
+# Not part of any engine build.
+datagen = ["dep:ruzstd"]
 # Offline magic-constant search. Not part of any engine build.
 magicgen = []
 # Opening-book generation for match testing. Not part of any engine build.
@@ -42,6 +43,10 @@ bookgen = []
 [dependencies]
 # Stack-allocated move lists in the hot path; no heap allocation inside search.
 arrayvec = "0.7"
+# zstd decoding for the Lichess evaluation database, in pure Rust so the
+# converter builds the same on Windows and on a rented Linux box with no C
+# toolchain or zstd binary. Data tools only, behind `datagen`.
+ruzstd = { version = "0.9", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -88,4 +93,9 @@ required-features = ["datagen"]
 [[bin]]
 name = "netcheck"
 path = "src/bin/netcheck.rs"
+required-features = ["datagen"]
+
+[[bin]]
+name = "lichesseval"
+path = "src/bin/lichesseval.rs"
 required-features = ["datagen"]
