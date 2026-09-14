@@ -38,7 +38,7 @@ fi
 BU="${BULLET_UTILS:-tools/bullet-utils.exe}"
 SMOKE_DATA=data/tp8.shuffled.data
 SMOKE_TEXT=data/tp8.dedup.txt
-LICHESS_SLICE=dist/lichess_eval_head.zst
+HF_SAMPLE=dist/hf_sample.tsv
 BUNDLE=dist/newchessbot-train.tar.gz
 CHECK_LINES=200000
 
@@ -114,11 +114,15 @@ if [ "$MODE" = selfplay ]; then
     ./target/release/datacheck.exe "$STEM.check.txt" > /dev/null || fail "datacheck rejected the check sample"
     echo "$(wc -l < "$STEM.check.txt") lines, datacheck PASS"
 else
-    log "1. lichesseval on the first 50 MB of the database"
-    [ -f "$LICHESS_SLICE" ] || fail "missing $LICHESS_SLICE -- fetch the first 50 MB of lichess_db_eval.jsonl.zst"
-    ./target/release/lichesseval.exe "$LICHESS_SLICE" dist/lichess_head.txt 2> dist/lichesseval.log \
-        || { cat dist/lichesseval.log; fail "lichesseval rejected the test slice"; }
-    grep -E "^kept|r =|PASS" dist/lichesseval.log
+    log "1. lichesseval --tsv on a sample of the Hugging Face dataset"
+    [ -f "$HF_SAMPLE" ] || fail "missing $HF_SAMPLE -- rows of mateuszgrzyb/lichess-stockfish-normalized as TSV"
+    ./target/release/lichesseval.exe --tsv "$HF_SAMPLE" dist/lichess_head.txt 2> dist/lichesseval.log \
+        || { cat dist/lichesseval.log; fail "lichesseval rejected the sample"; }
+    grep -E "^kept|not quiet|r =|PASS" dist/lichesseval.log
+    # Syntax only: pyarrow is installed on the rental, not here.
+    python -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" trainer/vast/parquet2tsv.py \
+        || fail "parquet2tsv.py does not parse"
+    echo "parquet2tsv.py parses"
 
     log "2. every converted line survives bullet-utils"
     "$BU" convert --from text --input dist/lichess_head.txt --output dist/lichess_head.data --threads 4 > dist/convert.log
@@ -166,7 +170,7 @@ rm -rf "$work"
 check=$(mktemp -d)
 tar -xzf "$BUNDLE" -C "$check"
 r="$check/newchessbot-train"
-need="trainer/Cargo.toml trainer/Cargo.lock trainer/src/main.rs trainer/vast/run.sh
+need="trainer/Cargo.toml trainer/Cargo.lock trainer/src/main.rs trainer/vast/run.sh trainer/vast/parquet2tsv.py
       engine/Cargo.toml engine/Cargo.lock engine/src/nnue.rs engine/src/bin/netcheck.rs
       engine/src/bin/lichesseval.rs engine/networks/default.bin engine/benches/engine.rs
       data/$(basename "$SMOKE_DATA") data/$(basename "$SMOKE_TEXT")"

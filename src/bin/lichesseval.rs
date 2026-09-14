@@ -1,32 +1,40 @@
-//! Convert the Lichess evaluation database into bullet's text format.
+//! Convert Lichess evaluation data into bullet's text format.
 //!
 //! ```text
 //! cargo build --release --features datagen --bin lichesseval
 //! ./target/release/lichesseval lichess_db_eval.jsonl.zst data/lichess.txt [max_positions]
-//! curl -s https://database.lichess.org/lichess_db_eval.jsonl.zst \
-//!     | ./target/release/lichesseval - data/lichess.txt
+//! python parquet2tsv.py train-00000.parquet | ./target/release/lichesseval --tsv - data/shard0.txt
 //! ```
 //!
-//! The input is the zstd-compressed JSON-lines file from database.lichess.org
-//! (CC0): about 410M positions evaluated by Stockfish in users' browsers. `-`
-//! reads the compressed stream from stdin, so the 22 GB download can be piped
-//! straight in without ever touching the disk.
+//! Two inputs, the same data:
+//!
+//! - the zstd-compressed JSON-lines file from database.lichess.org (CC0), with
+//!   every evaluation and principal variation per position. `-` reads it from
+//!   stdin. That server is too slow to feed a rental (~170 KB/s), so this mode
+//!   is kept for local use.
+//! - `--tsv`: `fen \t depth \t cp \t mate` lines, one position each, as
+//!   `trainer/vast/parquet2tsv.py` streams them from the deduplicated Hugging
+//!   Face mirror (`mateuszgrzyb/lichess-stockfish-normalized`, CC BY 4.0,
+//!   derived from the Lichess CC0 database), which already keeps only the
+//!   deepest evaluation per position.
 //!
 //! Each output line is `<FEN> | <centipawns> | 0.5`, score White-relative --
-//! the same text format datagen writes. The file has no game results, so the
+//! the same text format datagen writes. There are no game results, so the
 //! result column is a placeholder and training must run at WDL 0.0.
 //!
 //! # What is kept
 //!
-//! Per position, the deepest evaluation's first principal variation, as
-//! Lichess recommends. Then the same reasoning as datagen's quiet filter: the
-//! network has no search, so a position whose value depends on an immediate
-//! tactic teaches it noise. Dropped:
+//! The network has no search, so a position whose value depends on an
+//! immediate tactic teaches it noise. Dropped:
 //!
 //! - mate scores, which saturate the training sigmoid and carry no gradient,
 //! - shallow searches, below [`MIN_DEPTH`],
+//! - impossible material, which the analysis board allows and bullet cannot store,
 //! - the side to move in check,
-//! - a best move that captures or promotes -- the position is not quiet,
+//! - positions that are not quiet: in JSON mode, a best move that captures or
+//!   promotes; in TSV mode, which has no principal variation, datagen's own
+//!   test -- quiescence moves the static evaluation by more than
+//!   [`QUIET_MARGIN`] centipawns,
 //! - scores beyond [`MAX_CP`], already decided,
 //! - insufficient material, a dead draw bullet's validator rejects.
 //!
@@ -40,19 +48,24 @@
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::process::ExitCode;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
 use ruzstd::decoding::StreamingDecoder;
 
 use newchessbot::board::Position;
 use newchessbot::eval::evaluate;
-use newchessbot::search::is_insufficient_material;
+use newchessbot::search::{is_insufficient_material, Evaluator, Search};
 use newchessbot::types::{Color, PieceType, Square};
 
 /// Shallower evaluations are too noisy to be worth a label.
 const MIN_DEPTH: i64 = 18;
 /// Beyond this the game is decided and the label carries almost no gradient.
 const MAX_CP: i64 = 3_000;
+/// TSV mode's quiet test, the same margin datagen uses between static
+/// evaluation and quiescence.
+const QUIET_MARGIN: i32 = 60;
 /// Below this correlation with the handcrafted eval on either side, the score
 /// convention is wrong rather than the evaluations merely disagreeing.
 const MIN_SIGN_CORRELATION: f64 = 0.3;
@@ -247,10 +260,79 @@ struct Stats {
     bad_fen: u64,
     impossible: u64,
     in_check: u64,
-    forcing: u64,
+    not_quiet: u64,
     extreme: u64,
     insufficient: u64,
     kept: u64,
+}
+
+/// Decode a zstd stream line by line, across however many frames it holds.
+///
+/// The Lichess file comes from a parallel compressor: many frames, each
+/// preceded by a skippable frame recording its size. ruzstd's
+/// `StreamingDecoder` reads exactly one frame and reports a skippable one as an
+/// error, so the frames are walked here. Frames split at arbitrary bytes, so a
+/// line cut by a frame boundary is carried over to the next.
+///
+/// `handle` returns whether to keep going. The result says whether the stream
+/// ended mid-frame -- a cut-off download -- in which case everything before
+/// the cut has still been handled.
+fn for_each_zstd_line(input: impl Read, mut handle: impl FnMut(&str) -> bool) -> io::Result<bool> {
+    let mut source = BufReader::with_capacity(1 << 20, input);
+    let mut pending: Vec<u8> = Vec::new();
+    let mut chunk = vec![0u8; 1 << 20];
+
+    loop {
+        if source.fill_buf()?.is_empty() {
+            break;
+        }
+        let mut frame = match StreamingDecoder::new(&mut source) {
+            Ok(frame) => frame,
+            Err(FrameDecoderError::ReadFrameHeaderError(ReadFrameHeaderError::SkipFrame {
+                length,
+                ..
+            })) => {
+                io::copy(&mut (&mut source).take(u64::from(length)), &mut io::sink())?;
+                continue;
+            }
+            Err(_) => return Ok(true),
+        };
+        loop {
+            let n = match frame.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) => return Ok(true),
+            };
+            pending.extend_from_slice(&chunk[..n]);
+            if let Some(last) = pending.iter().rposition(|&b| b == b'\n') {
+                for line in pending[..last].split(|&b| b == b'\n') {
+                    if let Ok(text) = std::str::from_utf8(line) {
+                        if !handle(text.trim_end_matches('\r')) {
+                            return Ok(false);
+                        }
+                    }
+                }
+                pending.drain(..=last);
+            }
+        }
+    }
+    // A complete stream whose last line has no newline.
+    if !pending.is_empty() {
+        if let Ok(text) = std::str::from_utf8(&pending) {
+            handle(text.trim_end_matches('\r'));
+        }
+    }
+    Ok(false)
+}
+
+/// Plain text, line by line. Never truncated in the zstd sense.
+fn for_each_text_line(input: impl Read, mut handle: impl FnMut(&str) -> bool) -> io::Result<bool> {
+    for line in BufReader::with_capacity(1 << 20, input).lines() {
+        if !handle(line?.trim_end_matches('\r')) {
+            break;
+        }
+    }
+    Ok(false)
 }
 
 /// Could this material have arisen in a real game?
@@ -303,67 +385,55 @@ fn is_forcing(pos: &Position, uci: &str) -> Option<bool> {
     })
 }
 
-/// Decode a zstd stream line by line, across however many frames it holds.
-///
-/// The Lichess file comes from a parallel compressor: many frames, each
-/// preceded by a skippable frame recording its size. ruzstd's
-/// `StreamingDecoder` reads exactly one frame and reports a skippable one as an
-/// error, so the frames are walked here. Frames split at arbitrary bytes, so a
-/// line cut by a frame boundary is carried over to the next.
-///
-/// `handle` returns whether to keep going. The result says whether the stream
-/// ended mid-frame -- a cut-off download -- in which case everything before
-/// the cut has still been handled.
-fn for_each_line(input: impl Read, mut handle: impl FnMut(&str) -> bool) -> io::Result<bool> {
-    let mut source = BufReader::with_capacity(1 << 20, input);
-    let mut pending: Vec<u8> = Vec::new();
-    let mut chunk = vec![0u8; 1 << 20];
-
-    loop {
-        if source.fill_buf()?.is_empty() {
-            break;
+/// Checks shared by both formats once the FEN and score are known.
+/// `quiet` is the format's own test, applied after the cheaper ones.
+fn finish(
+    fen: &str,
+    cp: i64,
+    stats: &mut Stats,
+    quiet: impl FnOnce(&Position) -> Option<bool>,
+) -> Option<(Position, String, i64)> {
+    // Lichess FENs stop after the en passant field.
+    let full_fen = if fen.split_whitespace().count() == 4 {
+        format!("{fen} 0 1")
+    } else {
+        fen.to_owned()
+    };
+    let Ok(pos) = full_fen.parse::<Position>() else {
+        stats.bad_fen += 1;
+        return None;
+    };
+    if !is_plausible(&pos) {
+        stats.impossible += 1;
+        return None;
+    }
+    if pos.in_check(pos.side_to_move()) {
+        stats.in_check += 1;
+        return None;
+    }
+    if cp.abs() > MAX_CP {
+        stats.extreme += 1;
+        return None;
+    }
+    if is_insufficient_material(&pos) {
+        stats.insufficient += 1;
+        return None;
+    }
+    match quiet(&pos) {
+        Some(true) => Some((pos, full_fen, cp)),
+        Some(false) => {
+            stats.not_quiet += 1;
+            None
         }
-        let mut frame = match StreamingDecoder::new(&mut source) {
-            Ok(frame) => frame,
-            Err(FrameDecoderError::ReadFrameHeaderError(ReadFrameHeaderError::SkipFrame {
-                length,
-                ..
-            })) => {
-                io::copy(&mut (&mut source).take(u64::from(length)), &mut io::sink())?;
-                continue;
-            }
-            Err(_) => return Ok(true),
-        };
-        loop {
-            let n = match frame.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => n,
-                Err(_) => return Ok(true),
-            };
-            pending.extend_from_slice(&chunk[..n]);
-            if let Some(last) = pending.iter().rposition(|&b| b == b'\n') {
-                for line in pending[..last].split(|&b| b == b'\n') {
-                    if let Ok(text) = std::str::from_utf8(line) {
-                        if !handle(text.trim_end_matches('\r')) {
-                            return Ok(false);
-                        }
-                    }
-                }
-                pending.drain(..=last);
-            }
+        None => {
+            stats.unreadable += 1;
+            None
         }
     }
-    // A complete stream whose last line has no newline.
-    if !pending.is_empty() {
-        if let Ok(text) = std::str::from_utf8(&pending) {
-            handle(text.trim_end_matches('\r'));
-        }
-    }
-    Ok(false)
 }
 
-/// The label for one line, or which filter rejected it.
-fn convert(line: &str, stats: &mut Stats) -> Option<(Position, String, i64)> {
+/// One JSON line: the deepest evaluation's first principal variation.
+fn convert_json(line: &str, stats: &mut Stats) -> Option<(Position, String, i64)> {
     let Some(json) = Parser::parse(line) else {
         stats.unreadable += 1;
         return None;
@@ -406,53 +476,54 @@ fn convert(line: &str, stats: &mut Stats) -> Option<(Position, String, i64)> {
         return None;
     }
 
-    // Lichess FENs stop after the en passant field.
-    let full_fen = format!("{fen} 0 1");
-    let Ok(pos) = full_fen.parse::<Position>() else {
-        stats.bad_fen += 1;
+    let first_move = pv
+        .get("line")
+        .and_then(Json::as_str)
+        .and_then(|l| l.split_whitespace().next())
+        .map(str::to_owned);
+    finish(fen, cp, stats, |pos| {
+        first_move.and_then(|mv| is_forcing(pos, &mv)).map(|forcing| !forcing)
+    })
+}
+
+/// One TSV line: `fen \t depth \t cp \t mate`, empty fields for nulls.
+fn convert_tsv(line: &str, stats: &mut Stats, search: &mut Search) -> Option<(Position, String, i64)> {
+    let fields: Vec<&str> = line.split('\t').collect();
+    let [fen, depth, cp, mate] = fields[..] else {
+        stats.unreadable += 1;
         return None;
     };
-    if !is_plausible(&pos) {
-        stats.impossible += 1;
+    if !mate.trim().is_empty() {
+        stats.mate += 1;
         return None;
     }
-    if pos.in_check(pos.side_to_move()) {
-        stats.in_check += 1;
+    let (Ok(depth), Ok(cp)) = (depth.trim().parse::<i64>(), cp.trim().parse::<i64>()) else {
+        stats.unreadable += 1;
+        return None;
+    };
+    if depth < MIN_DEPTH {
+        stats.shallow += 1;
         return None;
     }
-    let first_move = pv.get("line").and_then(Json::as_str).and_then(|l| l.split_whitespace().next());
-    match first_move.and_then(|mv| is_forcing(&pos, mv)) {
-        Some(false) => {}
-        Some(true) => {
-            stats.forcing += 1;
-            return None;
-        }
-        None => {
-            stats.unreadable += 1;
-            return None;
-        }
-    }
-    if cp.abs() > MAX_CP {
-        stats.extreme += 1;
-        return None;
-    }
-    if is_insufficient_material(&pos) {
-        stats.insufficient += 1;
-        return None;
-    }
-
-    Some((pos, full_fen, cp))
+    finish(fen, cp, stats, |pos| {
+        let stand_pat = evaluate(pos);
+        Some((search.quiescence_score(pos) - stand_pat).abs() <= QUIET_MARGIN)
+    })
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
-    let (Some(input), Some(output)) = (args.get(1), args.get(2)) else {
-        eprintln!("usage: lichesseval <lichess_db_eval.jsonl.zst | -> <out.txt> [max_positions]");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let tsv = args.iter().any(|a| a == "--tsv");
+    let positional: Vec<&String> = args.iter().filter(|a| *a != "--tsv").collect();
+    let (Some(input), Some(output)) = (positional.first(), positional.get(1)) else {
+        eprintln!(
+            "usage: lichesseval [--tsv] <lichess_db_eval.jsonl.zst | shard.tsv | -> <out.txt> [max_positions]"
+        );
         return ExitCode::from(2);
     };
-    let limit: u64 = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(u64::MAX);
+    let limit: u64 = positional.get(2).and_then(|v| v.parse().ok()).unwrap_or(u64::MAX);
 
-    let compressed: Box<dyn Read> = if input == "-" {
+    let source: Box<dyn Read> = if input.as_str() == "-" {
         Box::new(io::stdin().lock())
     } else {
         match File::open(input) {
@@ -473,17 +544,26 @@ fn main() -> ExitCode {
     let mut out = BufWriter::with_capacity(1 << 20, out);
 
     newchessbot::magic::init();
+    // The quiet test in TSV mode compares against the handcrafted evaluation,
+    // so quiescence must use it too.
+    let mut search = Search::new(Arc::new(AtomicBool::new(false)));
+    search.set_evaluator(Evaluator::Handcrafted);
 
     let mut stats = Stats::default();
     let mut sign = [Correlation::default(), Correlation::default()];
     let mut write_failed = false;
 
-    let truncated = for_each_line(compressed, |line| {
+    let handle = |line: &str| {
         stats.lines += 1;
         if stats.lines % 10_000_000 == 0 {
             eprintln!("{} lines, {} kept", stats.lines, stats.kept);
         }
-        let Some((pos, fen, cp)) = convert(line, &mut stats) else {
+        let converted = if tsv {
+            convert_tsv(line, &mut stats, &mut search)
+        } else {
+            convert_json(line, &mut stats)
+        };
+        let Some((pos, fen, cp)) = converted else {
             return true;
         };
         let stm = pos.side_to_move();
@@ -498,7 +578,12 @@ fn main() -> ExitCode {
         }
         stats.kept += 1;
         stats.kept < limit
-    });
+    };
+    let truncated = if tsv {
+        for_each_text_line(source, handle)
+    } else {
+        for_each_zstd_line(source, handle)
+    };
     let truncated = match truncated {
         Ok(truncated) => truncated,
         Err(e) => {
@@ -519,9 +604,9 @@ fn main() -> ExitCode {
     eprintln!("bad FEN            {}", s.bad_fen);
     eprintln!("impossible pos.    {}", s.impossible);
     eprintln!("in check           {}", s.in_check);
-    eprintln!("capture/promotion  {}", s.forcing);
     eprintln!("|cp| > {MAX_CP}       {}", s.extreme);
     eprintln!("insufficient mat.  {}", s.insufficient);
+    eprintln!("not quiet          {}", s.not_quiet);
     eprintln!("kept               {}", s.kept);
     eprintln!();
     eprintln!("score vs handcrafted eval, White to move r = {:.3}", sign[0].r());
