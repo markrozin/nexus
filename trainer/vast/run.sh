@@ -11,6 +11,12 @@
 #
 #   bash trainer/vast/run.sh check   # only the fast checks, nothing billed-heavy
 #
+#   nohup bash trainer/vast/run.sh lichess > run.log 2>&1 &
+#       The same guarded session, but after the smoke train it streams the
+#       Lichess evaluation database (22 GB, CC0) straight into lichesseval on
+#       this box -- nothing of the download is stored -- and trains on that at
+#       WDL 0.0. Needs ~60 GB free disk; MAX_POSITIONS stops the stream early.
+#
 # `all` runs: fail-fast checks -> build -> smoke train -> on-box netcheck ->
 # real training -> final netcheck -> download window -> the instance destroys
 # itself. `nohup` matters: a dropped SSH session must not kill the run halfway.
@@ -48,6 +54,14 @@ SMOKE_DATA="$DATA/tp8.shuffled.data"
 SMOKE_TEXT="$DATA/tp8.dedup.txt"
 TRAIN_DATA="$DATA/pipeline.shuffled.data"
 TRAIN_TEXT="$DATA/pipeline.check.txt"
+
+LICHESS_URL="https://database.lichess.org/lichess_db_eval.jsonl.zst"
+# Must equal the rev in trainer/Cargo.toml, so bullet-utils writes exactly the
+# format the trainer reads. prepare.sh checks the two agree.
+BULLET_REV="629ee50000b2afb7b3337595401c830d3b1e0f42"
+# About 230M kept positions: ~16 GB of text, then 7 GB of bulletformat twice
+# while shuffling, with headroom for the build.
+MIN_FREE_GB_LICHESS=60
 
 DOWNLOAD_GRACE_MIN="${DOWNLOAD_GRACE_MIN:-15}"
 FAILURE_GRACE_MIN="${FAILURE_GRACE_MIN:-5}"
@@ -262,14 +276,97 @@ train() {
     TRAINED_NET="$net"
 }
 
-all() {
-    for f in "$SMOKE_DATA" "$SMOKE_TEXT" "$TRAIN_DATA" "$TRAIN_TEXT"; do
+need_disk() {
+    local need_gb="$1" free_gb
+    free_gb=$(df -P -BG "$BUNDLE" | awk 'NR == 2 { gsub("G", "", $4); print $4 }')
+    log "checking disk: $free_gb GB free, $need_gb GB needed"
+    if [ "$free_gb" -lt "$need_gb" ]; then
+        echo "Not enough disk for this run. Destroy the instance and rent one with more." >&2
+        exit 1
+    fi
+}
+
+# Stream the Lichess evaluation database into the converter, then turn the
+# result into shuffled bulletformat. Each intermediate is deleted once the next
+# stage has been verified, and none of the 22 GB download is ever stored.
+prepare_lichess() {
+    local text="$DATA/lichess.txt" raw="$DATA/lichess.data" shuffled="$DATA/lichess.shuffled.data"
+
+    log "building bullet-utils at the trainer's bullet revision"
+    with_cap cargo install --locked --git https://github.com/jw1912/bullet --rev "$BULLET_REV" \
+        bullet-utils --root "$BUNDLE/tools"
+    local utils="$BUNDLE/tools/bin/bullet-utils"
+
+    log "building lichesseval"
+    (cd "$ENGINE" && with_cap cargo build --release --locked --features datagen --bin lichesseval)
+
+    log "streaming the Lichess evaluation database into lichesseval"
+    with_cap bash -c '
+        curl -sSfL --retry 3 "$1" | "$2" - "$3" $4
+        status=("${PIPESTATUS[@]}")
+        [ "${status[1]}" -eq 0 ] || exit "${status[1]}"
+        # With a MAX_POSITIONS limit the reader stops early and curl dies of
+        # SIGPIPE, which is expected. Without one, a curl failure is real.
+        [ -n "$4" ] || [ "${status[0]}" -eq 0 ] || exit "${status[0]}"
+    ' _ "$LICHESS_URL" "$ENGINE/target/release/lichesseval" "$text" "${MAX_POSITIONS:-}" \
+        2>&1 | tee "$DATA/lichesseval.log"
+    if [ -z "${MAX_POSITIONS:-}" ] && grep -q "mid-frame" "$DATA/lichesseval.log"; then
+        echo "WARNING: the download ended early; training on the positions that arrived." >&2
+    fi
+
+    local lines records errors
+    lines=$(wc -l < "$text")
+    # A sample for netcheck, taken before the text is deleted. It overlaps the
+    # training set, so it tests the pipeline, not generalisation.
+    shuf -n 200000 "$text" > "$DATA/lichess.check.txt"
+
+    log "converting $lines positions to bulletformat"
+    with_cap "$utils" convert --from text --input "$text" --output "$raw" --threads "$(nproc)" \
+        > "$DATA/convert.log"
+    tail -2 "$DATA/convert.log"
+    errors=$(grep -ci "error parsing" "$DATA/convert.log" || true)
+    records=$(( $(stat -c %s "$raw") / 32 ))
+    if [ "$errors" != 0 ] || [ "$records" != "$lines" ]; then
+        echo "conversion lost positions: $errors parse errors, $records records from $lines lines" >&2
+        exit 1
+    fi
+    rm -f "$text"
+
+    log "validating"
+    "$utils" validate --input "$raw" > "$DATA/validate.log"
+    tail -3 "$DATA/validate.log"
+    grep -q "No invalid positions!" "$DATA/validate.log" \
+        || { echo "bullet validate found invalid positions" >&2; exit 1; }
+
+    log "shuffling"
+    with_cap "$utils" shuffle --input "$raw" --output "$shuffled" --mem-used-mb "${SHUFFLE_MB:-8192}"
+    [ "$(stat -c %s "$raw")" = "$(stat -c %s "$shuffled")" ] \
+        || { echo "shuffle changed the file size" >&2; exit 1; }
+    rm -f "$raw"
+
+    TRAIN_DATA="$shuffled"
+    TRAIN_TEXT="$DATA/lichess.check.txt"
+}
+
+# `selfplay` trains on the datagen output in the bundle; `lichess` fetches
+# and converts the Lichess database on this box first.
+session() {
+    local mode="$1" required
+    if [ "$mode" = lichess ]; then
+        required="$SMOKE_DATA $SMOKE_TEXT"
+    else
+        required="$SMOKE_DATA $SMOKE_TEXT $TRAIN_DATA $TRAIN_TEXT"
+    fi
+    for f in $required; do
         [ -f "$f" ] || { echo "missing $f -- was this bundle made by prepare.sh?" >&2; exit 1; }
     done
 
     need_cuda
     need_self_destroy
     need_budget
+    if [ "$mode" = lichess ]; then
+        need_disk "$MIN_FREE_GB_LICHESS"
+    fi
     arm_cleanup
 
     need_rust
@@ -277,16 +374,25 @@ all() {
 
     # Enough epochs over 16K positions to learn them properly, so netcheck tests
     # the loader and perspective rather than merely catching an undertrained net.
+    # Runs before the Lichess download, so a broken build costs minutes, not
+    # the whole stream.
     train "$SMOKE_DATA" smoke 20 1024
     netcheck_gate "$TRAINED_NET" "$SMOKE_TEXT"
 
+    local default_wdls="0.0 0.4"
+    if [ "$mode" = lichess ]; then
+        prepare_lichess
+        # No game results in that data, so only the score can be learned.
+        default_wdls="0.0"
+    fi
+
     # One net per WDL weight. Training is seconds per net at this size, so a
-    # sweep costs almost nothing beyond the setup already paid for. WDL 0.0
-    # (search score only) is the control: it should all but reproduce the
-    # evaluation that labelled the data.
+    # sweep costs almost nothing beyond the setup already paid for. On
+    # self-play data WDL 0.0 (search score only) is the control: it should all
+    # but reproduce the evaluation that labelled the data.
     local wdl finals=""
-    for wdl in ${WDLS:-0.0 0.4}; do
-        train "$TRAIN_DATA" "newchessbot-wdl$wdl" "$EPOCHS" 16384 "$wdl"
+    for wdl in ${WDLS:-$default_wdls}; do
+        train "$TRAIN_DATA" "newchessbot-$mode-wdl$wdl" "$EPOCHS" 16384 "$wdl"
         netcheck_gate "$TRAINED_NET" "$TRAIN_TEXT"
         finals="$finals $TRAINED_NET"
     done
@@ -301,7 +407,8 @@ all() {
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 case "${1:-}" in
-    all) all ;;
+    all) session selfplay ;;
+    lichess) session lichess ;;
     check)
         need_cuda
         need_self_destroy
@@ -310,8 +417,9 @@ case "${1:-}" in
         echo "checks passed. Run: nohup bash trainer/vast/run.sh all > run.log 2>&1 &"
         ;;
     *)
-        echo "usage: bash trainer/vast/run.sh all     # the whole guarded session"
-        echo "       bash trainer/vast/run.sh check   # fast checks only"
+        echo "usage: bash trainer/vast/run.sh all       # guarded session on the bundled self-play data"
+        echo "       bash trainer/vast/run.sh lichess   # guarded session on the Lichess evaluation database"
+        echo "       bash trainer/vast/run.sh check     # fast checks only"
         exit 2
         ;;
 esac
