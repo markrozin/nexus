@@ -41,9 +41,14 @@ NETS_OUT="$ROOT/nets/$MODE-$(date +%Y%m%d-%H%M)"
 MAX_PRICE="${MAX_PRICE:-0.70}"
 MAX_DOLLARS="${MAX_DOLLARS:-3}"
 CREDIT_FLOOR="${CREDIT_FLOOR:-2}"
-BOOT_TIMEOUT_MIN="${BOOT_TIMEOUT_MIN:-20}"
+BOOT_TIMEOUT_MIN="${BOOT_TIMEOUT_MIN:-12}"
 POLL_SECONDS=120
-IMAGE="vastai/base-image:cuda-12.8.1-auto"
+# Instances are created from vast.ai's own NVIDIA CUDA template, not a bare
+# image: the base image starts sshd only through the template's onstart
+# (entrypoint.sh). Session 3 created from the bare image and its ssh port
+# refused every connection for 20 minutes. The newest official version is
+# looked up at run time.
+TEMPLATE_QUERY='name="NVIDIA CUDA" creator_id=62897'
 DISK_GB=100
 LABEL="newchessbot-$MODE"
 # China is excluded: Hugging Face is unreliable from there, and the session
@@ -134,6 +139,14 @@ print(r['id'], round(r['dph_total'], 4), r.get('geolocation', '?').replace(' ', 
 read -r OFFER PRICE WHERE MACHINE RELIABILITY DOWN CPUS <<< "$choice"
 log "chosen offer $OFFER: \$$PRICE/hr, $WHERE, machine $MACHINE, reliability $RELIABILITY, ${DOWN} Mbps down, $CPUS cpus"
 
+TEMPLATE=$(vast search templates "$TEMPLATE_QUERY" --raw 2> "$STATE/templates.err" | json '
+rows = d if isinstance(d, list) else d.get("templates", [])
+rows = [r for r in rows if r.get("onstart") == "entrypoint.sh" and r.get("use_ssh")]
+if not rows: sys.exit(1)
+print(max(rows, key=lambda r: r.get("created_at") or 0)["hash_id"])
+') || die "cannot find the official NVIDIA CUDA template"
+log "template $TEMPLATE (official NVIDIA CUDA, ssh enabled, onstart entrypoint.sh)"
+
 CAP_MINUTES=$("$PY" -c "print(int($MAX_DOLLARS / $PRICE * 60))")
 log "limits: \$$MAX_DOLLARS cap at \$$PRICE/hr = $CAP_MINUTES minutes; local deadline adds 20"
 
@@ -144,7 +157,7 @@ fi
 
 # ---------------------------------------------------------------------------
 log "creating instance from offer $OFFER"
-vast create instance "$OFFER" --image "$IMAGE" --disk "$DISK_GB" --ssh --direct \
+vast create instance "$OFFER" --template_hash "$TEMPLATE" --disk "$DISK_GB" \
     --label "$LABEL" --cancel-unavail --raw > "$STATE/create.json" 2> "$STATE/create.err"
 INSTANCE=$(json 'print(d["new_contract"]) if d.get("success") else sys.exit(1)' < "$STATE/create.json" 2>/dev/null) \
     || { INSTANCE=""; die "create failed: $(cat "$STATE/create.json" "$STATE/create.err" 2>/dev/null)"; }
@@ -165,21 +178,47 @@ while :; do
 done
 log "running"
 
-url=$(vast ssh-url "$INSTANCE" 2>/dev/null | tr -d '\r')
-[[ "$url" =~ ssh://([^@]+)@([^:]+):([0-9]+) ]] || die "unexpected ssh-url output: $url"
-SSH_USER="${BASH_REMATCH[1]}"
-SSH_HOST="${BASH_REMATCH[2]}"
-SSH_PORT="${BASH_REMATCH[3]}"
+# Every way in the instance data offers: the CLI's ssh-url, the proxy
+# (ssh_host:ssh_port) and the direct mapping of container port 22. Each is
+# tried in turn until one answers, since which works depends on the machine.
+ssh_candidates() {
+    vast ssh-url "$INSTANCE" 2>/dev/null | tr -d '\r' | sed -nE 's#^ssh://[^@]+@([^:]+):([0-9]+).*#\1 \2#p'
+    vast show instance "$INSTANCE" --raw 2>/dev/null | json '
+if d.get("ssh_host") and d.get("ssh_port"): print(d["ssh_host"], d["ssh_port"])
+m = (d.get("ports") or {}).get("22/tcp") or []
+if d.get("public_ipaddr") and m: print(d["public_ipaddr"].strip(), m[0]["HostPort"])
+' 2>/dev/null
+}
+
+SSH_HOST=""
+until [ -n "$SSH_HOST" ]; do
+    while read -r host port; do
+        [ -n "$host" ] || continue
+        if ssh -p "$port" -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new \
+            -o UserKnownHostsFile="$STATE/known_hosts" -o ConnectTimeout=15 -o BatchMode=yes \
+            "root@$host" true 2>> "$STATE/ssh.err"; then
+            SSH_HOST="$host"
+            SSH_PORT="$port"
+            break
+        fi
+    done < <(ssh_candidates | sort -u)
+    if [ -z "$SSH_HOST" ]; then
+        if [ "$(date +%s)" -ge "$boot_deadline" ]; then
+            # Keep what the instance reported, minus anything secret, for the post-mortem.
+            vast show instance "$INSTANCE" --raw 2>/dev/null | json '
+for k in list(d):
+    if any(s in k.lower() for s in ("key", "token", "pass", "secret")): d.pop(k)
+print(json.dumps(d, indent=1))' > "$STATE/instance-at-failure.json" 2>/dev/null
+            die "ssh never became reachable on any endpoint: $(tail -3 "$STATE/ssh.err")"
+        fi
+        sleep 15
+    fi
+done
+SSH_USER=root
 SSH_OPTS=(-p "$SSH_PORT" -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new
     -o UserKnownHostsFile="$STATE/known_hosts" -o ConnectTimeout=20 -o ServerAliveInterval=30
     -o BatchMode=yes "$SSH_USER@$SSH_HOST")
-log "ssh $SSH_USER@$SSH_HOST:$SSH_PORT"
-
-until ssh_run true 2> "$STATE/ssh.err"; do
-    [ "$(date +%s)" -lt "$boot_deadline" ] || die "ssh never became reachable: $(tail -2 "$STATE/ssh.err")"
-    sleep 15
-done
-log "ssh reachable"
+log "ssh reachable at $SSH_HOST:$SSH_PORT"
 
 # ---------------------------------------------------------------------------
 log "uploading the bundle"
