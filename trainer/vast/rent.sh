@@ -299,7 +299,9 @@ while :; do
             mkdir -p "$NETS_OUT"
             cp "$STATE/run.log" "$NETS_OUT/run.log"
             fetched=0
-            for path in $(grep -A10 '^final networks:' "$STATE/run.log" | grep -oE '/workspace/[^ ]+\.bin'); do
+            # Only the indented lines directly under "final networks:" -- the
+            # session-ending listing that follows names every checkpoint file.
+            for path in $(awk '/^final networks:/ { f = 1; next } f && /^  \/workspace\// { print $1; next } f { exit }' "$STATE/run.log"); do
                 name=$(echo "$path" | awk -F/ '{ print $(NF-1) }')
                 if scp -P "$SSH_PORT" -i "$HOME/.ssh/id_ed25519" -o UserKnownHostsFile="$STATE/known_hosts" \
                     -o BatchMode=yes "$SSH_USER@$SSH_HOST:$path" "$NETS_OUT/$name.bin"; then
