@@ -66,6 +66,11 @@ const MAX_CP: i64 = 3_000;
 /// TSV mode's quiet test, the same margin datagen uses between static
 /// evaluation and quiescence.
 const QUIET_MARGIN: i32 = 60;
+/// Node budget for that test. Ordinary positions resolve in a few hundred
+/// nodes; a capture tree past this is a tactical melee by definition, and
+/// without the cap a cluster of analysis-board positions made quiescence run
+/// for hours.
+const QUIET_NODE_LIMIT: u64 = 5_000;
 /// Below this correlation with the handcrafted eval on either side, the score
 /// convention is wrong rather than the evaluations merely disagreeing.
 const MIN_SIGN_CORRELATION: f64 = 0.3;
@@ -507,7 +512,10 @@ fn convert_tsv(line: &str, stats: &mut Stats, search: &mut Search) -> Option<(Po
     }
     finish(fen, cp, stats, |pos| {
         let stand_pat = evaluate(pos);
-        Some((search.quiescence_score(pos) - stand_pat).abs() <= QUIET_MARGIN)
+        Some(match search.quiescence_score_limited(pos, QUIET_NODE_LIMIT) {
+            Some(resolved) => (resolved - stand_pat).abs() <= QUIET_MARGIN,
+            None => false,
+        })
     })
 }
 
@@ -555,7 +563,7 @@ fn main() -> ExitCode {
 
     let handle = |line: &str| {
         stats.lines += 1;
-        if stats.lines % 10_000_000 == 0 {
+        if stats.lines % 1_000_000 == 0 {
             eprintln!("{} lines, {} kept", stats.lines, stats.kept);
         }
         let converted = if tsv {

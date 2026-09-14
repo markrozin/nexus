@@ -270,10 +270,25 @@ log "run.sh $MODE started"
 # ---------------------------------------------------------------------------
 last_stage=""
 unreachable=0
+# A run.log that stops changing means the session is stuck, whatever stage it
+# claims. Session 5 sat silent for six hours before its cap destroyed it.
+STALE_MINUTES="${STALE_MINUTES:-25}"
+last_change=$(date +%s)
+last_size=""
 while :; do
     past_deadline && die "local wall-clock deadline reached"
-    if ssh_run "cat /workspace/newchessbot-train/run.log" > "$STATE/run.log" 2> "$STATE/ssh.err"; then
+    # Into a temp file first: a failed poll must not truncate the last good copy,
+    # which is the only diagnostic left once the instance is gone.
+    if ssh_run "cat /workspace/newchessbot-train/run.log" > "$STATE/run.log.tmp" 2> "$STATE/ssh.err" \
+        && mv "$STATE/run.log.tmp" "$STATE/run.log"; then
         unreachable=0
+        size_now=$(stat -c %s "$STATE/run.log")
+        if [ "$size_now" != "$last_size" ]; then
+            last_size=$size_now
+            last_change=$(date +%s)
+        fi
+        [ $(($(date +%s) - last_change)) -lt $((STALE_MINUTES * 60)) ] \
+            || die "run.log has not changed for $STALE_MINUTES minutes; the session is stuck"
         stage=$(grep -E '^=== ' "$STATE/run.log" | tail -1)
         if [ "$stage" != "$last_stage" ]; then
             log "$stage"
