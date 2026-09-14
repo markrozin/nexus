@@ -529,6 +529,27 @@ session cost ~$0.13 -- but the source is unusable at this size. The same CC0
 data is mirrored on Hugging Face (`Lichess/chess-position-evaluations`,
 parquet), served from a CDN.
 
+**Rentals run through the API now: `trainer/vast/rent.sh`, not the browser.**
+The vastai CLI (pip, key set by a human) drives search, create, SSH, upload,
+fetch and destroy; `reap.sh` destroys everything and verifies the account is
+empty. Hard-won rules, each from a failed session:
+
+- Create from the official NVIDIA CUDA template (`--template_hash`), not the
+  bare image: only the template's onstart starts sshd (session 3).
+- Start run.sh as one detached process with all streams redirected; an
+  `a && b && nohup c &` over ssh keeps the connection open until training
+  ends (session 4).
+- The conversion's quiet test must be node-bounded, and every long stage needs
+  a stall detector: sorted analysis-board positions made unpruned quiescence
+  run for six hours until the cap killed it (session 5, ~$2.17).
+
+Session 6, the first to work end to end: Arizona 4090 at $0.49/hr, 23 minutes
+from rent to verified destroy, **~$0.20**. Downloading 7 GB of shards took 6
+minutes, converting 316M rows to 191.5M kept positions about 4, training 40
+superbatches about 6. The net (`networks/candidates/lichess-wdl0-40.bin`)
+tracks Lichess Stockfish scores at r 0.79 against the handcrafted eval's
+0.49, with slope ~1.1 -- the scale problem of the first net is gone.
+
 Running from the browser: the Jupyter "direct HTTPS" links need vast's root
 certificate installed, which changes browser security settings -- don't. The
 Instance Portal (plain HTTP on the instance IP) lists Cloudflare tunnels with
