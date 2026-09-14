@@ -70,7 +70,7 @@ vast() { "$V" "$@"; }
 # list cannot be read -- which must never be mistaken for "no instances".
 list_ids() {
     vast show instances --raw 2> "$STATE/list.err" \
-        | json 'rows = d if isinstance(d, list) else d.get("instances", []); print(" ".join(str(r["id"]) for r in rows))'
+        | json 'rows = d if isinstance(d, list) else d.get("instances", []); print(" ".join(str(r["id"]) for r in rows))' 2>/dev/null
 }
 
 destroy_verified() {
@@ -110,7 +110,9 @@ on_exit() {
 trap on_exit EXIT
 trap 'exit 130' INT TERM HUP
 
-ssh_run() { ssh "${SSH_OPTS[@]}" "$@"; }
+# Every remote command has a timeout and no stdin: a hung connection must fail,
+# not stall the controller while the instance bills.
+ssh_run() { timeout 120 ssh -n "${SSH_OPTS[@]}" "$@"; }
 
 # ---------------------------------------------------------------------------
 log "preflight"
@@ -230,13 +232,39 @@ remote_sum=$(ssh_run "sha256sum /workspace/newchessbot-train.tar.gz" | cut -d' '
 [ "$local_sum" = "$remote_sum" ] || die "bundle checksum mismatch after upload"
 log "bundle verified on the instance"
 
-# The container's own environment (CONTAINER_ID, CONTAINER_API_KEY) is not
-# guaranteed in an ssh session, so it is read from PID 1 for run.sh's
-# self-destroy.
-ssh_run "cd /workspace && tar -xzf newchessbot-train.tar.gz && cd newchessbot-train \
-    && export \$(tr '\\0' '\\n' < /proc/1/environ | grep -E '^(CONTAINER_ID|CONTAINER_API_KEY)=' | xargs) \
-    && PRICE_PER_HOUR=$PRICE MAX_DOLLARS=$MAX_DOLLARS nohup bash trainer/vast/run.sh $MODE > run.log 2>&1 < /dev/null &" \
-    || die "could not start run.sh"
+ssh_run "cd /workspace && tar -xzf newchessbot-train.tar.gz && test -f newchessbot-train/trainer/vast/run.sh" \
+    || die "could not unpack the bundle on the instance"
+
+# Session 4 lost 50 minutes here: `a && b && nohup c &` backgrounds the whole
+# list in a subshell that still holds ssh's output, so ssh waited for the
+# training run to end. Now a launcher script is uploaded and started as one
+# detached process with every stream redirected, so ssh returns at once.
+cat > "$STATE/launch.sh" <<'EOF'
+#!/usr/bin/env bash
+# Started detached by rent.sh. The container's environment is not guaranteed
+# in an ssh session, so run.sh's self-destroy credentials come from PID 1.
+export $(tr '\0' '\n' < /proc/1/environ | grep -E '^(CONTAINER_ID|CONTAINER_API_KEY)=' | xargs)
+cd /workspace/newchessbot-train || exit 1
+export PRICE_PER_HOUR=__PRICE__ MAX_DOLLARS=__MAX_DOLLARS__
+exec bash trainer/vast/run.sh __MODE__
+EOF
+sed -i "s/__PRICE__/$PRICE/; s/__MAX_DOLLARS__/$MAX_DOLLARS/; s/__MODE__/$MODE/" "$STATE/launch.sh"
+timeout 60 ssh "${SSH_OPTS[@]}" "cat > /workspace/launch.sh" < "$STATE/launch.sh" \
+    || die "could not upload the launcher"
+timeout 60 ssh -n "${SSH_OPTS[@]}" \
+    "setsid nohup bash /workspace/launch.sh > /workspace/newchessbot-train/run.log 2>&1 < /dev/null & echo launched" \
+    || die "could not launch run.sh"
+
+started=0
+for _ in $(seq 1 12); do
+    sleep 10
+    if ssh_run "grep -q '=== checking GPU' /workspace/newchessbot-train/run.log" 2>/dev/null; then
+        started=1
+        break
+    fi
+done
+[ "$started" = 1 ] \
+    || die "run.sh did not start: $(ssh_run 'tail -5 /workspace/newchessbot-train/run.log' 2>&1)"
 log "run.sh $MODE started"
 
 # ---------------------------------------------------------------------------
