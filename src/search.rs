@@ -370,6 +370,28 @@ impl Search {
         self.quiescence(pos, -INFINITY, INFINITY, 0)
     }
 
+    /// [`Search::quiescence_score`] with a node budget: `None` if the capture
+    /// tree needs more than `max_nodes` to resolve.
+    ///
+    /// Unpruned quiescence is exponential in the worst case, and positions set
+    /// up on an analysis board -- nine queens a side -- find that case. One
+    /// such cluster stalled a rented data conversion for six hours.
+    pub fn quiescence_score_limited(&mut self, pos: &Position, max_nodes: u64) -> Option<i32> {
+        self.aborted = false;
+        // Marked done so `check_abort` enforces the node limit. There is no
+        // deadline and the stop flag is clear, so nothing else can abort.
+        self.first_iteration_done = true;
+        self.limits = SearchLimits {
+            max_nodes: Some(max_nodes),
+            ..Default::default()
+        };
+        self.deadline = None;
+        self.nodes = 0;
+        self.refresh_root(pos);
+        let score = self.quiescence(pos, -INFINITY, INFINITY, 0);
+        (!self.aborted).then_some(score)
+    }
+
     #[inline]
     fn history_index(color: Color, mv: Move) -> usize {
         (color.index() * 64 + mv.from().index()) * 64 + mv.to().index()
@@ -1100,6 +1122,23 @@ mod tests {
         let score = search.quiescence_score(&pos);
         assert!(score.abs() < MATE_IN_MAX_PLY);
         assert!(search.nodes() > 0);
+    }
+
+    #[test]
+    fn limited_quiescence_matches_unlimited_or_gives_up() {
+        let pos: Position = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"
+            .parse()
+            .unwrap();
+        let mut search = Search::new(Arc::new(AtomicBool::new(false)));
+        search.set_evaluator(Evaluator::Handcrafted);
+        let full = search.quiescence_score(&pos);
+        let needed = search.nodes();
+        assert!(needed > 1, "the test needs a position with captures to resolve");
+
+        assert_eq!(search.quiescence_score_limited(&pos, needed + 1_000), Some(full));
+        assert_eq!(search.quiescence_score_limited(&pos, 1), None, "a tiny budget gives up");
+        // An abort must not leak into the next unlimited call.
+        assert_eq!(search.quiescence_score(&pos), full);
     }
 
     #[test]

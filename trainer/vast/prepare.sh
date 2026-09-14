@@ -39,6 +39,7 @@ BU="${BULLET_UTILS:-tools/bullet-utils.exe}"
 SMOKE_DATA=data/tp8.shuffled.data
 SMOKE_TEXT=data/tp8.dedup.txt
 HF_SAMPLE=dist/hf_sample.tsv
+HF_PATHOLOGICAL=dist/hf_pathological.tsv
 BUNDLE=dist/newchessbot-train.tar.gz
 CHECK_LINES=200000
 
@@ -123,6 +124,13 @@ else
     python -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" trainer/vast/parquet2tsv.py \
         || fail "parquet2tsv.py does not parse"
     echo "parquet2tsv.py parses"
+
+    log "1b. the rows that stalled session 5 convert in bounded time"
+    [ -f "$HF_PATHOLOGICAL" ] || fail "missing $HF_PATHOLOGICAL -- the first 600,000 rows of train-00000.parquet as TSV"
+    start=$(date +%s)
+    timeout 120 ./target/release/lichesseval.exe --tsv "$HF_PATHOLOGICAL" dist/pathological.txt 2> dist/pathological.log \
+        || { tail -5 dist/pathological.log; fail "lichesseval took over 2 minutes on the rows that stalled session 5"; }
+    echo "$(wc -l < "$HF_PATHOLOGICAL") rows in $(($(date +%s) - start))s: $(grep -E '^kept' dist/pathological.log)"
 
     log "2. every converted line survives bullet-utils"
     "$BU" convert --from text --input dist/lichess_head.txt --output dist/lichess_head.data --threads 4 > dist/convert.log

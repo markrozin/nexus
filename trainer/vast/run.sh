@@ -76,6 +76,8 @@ MIN_FREE_GB_LICHESS=60
 DOWNLOAD_GRACE_MIN="${DOWNLOAD_GRACE_MIN:-15}"
 FAILURE_GRACE_MIN="${FAILURE_GRACE_MIN:-5}"
 EPOCHS="${EPOCHS:-40}"
+# The parallel conversion fails if its combined output stops growing this long.
+STALL_MINUTES="${STALL_MINUTES:-10}"
 
 log() { printf '\n=== %s ===\n' "$*"; }
 
@@ -354,7 +356,7 @@ prepare_lichess() {
     # The whole reader-to-converter path on real rows, before the long run.
     log "trial: 200,000 rows of $first through parquet2tsv and lichesseval"
     "$py" "$TRAINER/vast/parquet2tsv.py" "$work/$first" | head -200000 \
-        | "$converter" --tsv - "$work/trial.txt" 2> "$work/trial.log" \
+        | timeout 300 "$converter" --tsv - "$work/trial.txt" 2> "$work/trial.log" \
         || { cat "$work/trial.log" >&2; echo "the trial conversion failed" >&2; exit 1; }
     grep -E "^kept|not quiet|r =|PASS" "$work/trial.log"
     rm -f "$work/trial.txt"
@@ -371,6 +373,37 @@ prepare_lichess() {
         ' _ "$py" "$TRAINER/vast/parquet2tsv.py" "$work/$name" "$converter" "$work/$name.txt" \
             "${MAX_POSITIONS:+$((MAX_POSITIONS / 10))}" 2> "$work/$name.log" &
         pids="$pids $!"
+    done
+
+    # Wait with a stall detector. Session 5 sat here for six hours while one
+    # shard ground through pathological positions, and nothing noticed. Now
+    # the combined output must keep growing, or every job is killed and the
+    # session fails; progress goes to run.log where the controller sees it.
+    local shards last_bytes=-1 last_growth=$SECONDS bytes running
+    shards=$(echo "$HF_FILES" | wc -w)
+    while :; do
+        running=0
+        for pid in $pids; do
+            if kill -0 "$pid" 2>/dev/null; then
+                running=$((running + 1))
+            fi
+        done
+        bytes=$(du -cb "$work"/*.txt 2>/dev/null | tail -1 | cut -f1)
+        bytes=${bytes:-0}
+        if [ "$bytes" != "$last_bytes" ]; then
+            last_bytes=$bytes
+            last_growth=$SECONDS
+        fi
+        echo "conversion: $running of $shards shards running, $((bytes / 1048576)) MiB written"
+        [ "$running" -gt 0 ] || break
+        if [ $((SECONDS - last_growth)) -ge $((STALL_MINUTES * 60)) ]; then
+            echo "conversion STALLED: no new output for $STALL_MINUTES minutes; killing it" >&2
+            for pid in $pids; do
+                kill "$pid" 2>/dev/null
+            done
+            exit 1
+        fi
+        sleep 60
     done
     for pid in $pids; do
         wait "$pid" || failed=1
