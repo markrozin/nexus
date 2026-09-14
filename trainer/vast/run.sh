@@ -243,7 +243,7 @@ netcheck_gate() {
 }
 
 train() {
-    local data="$1" id="$2" epochs="$3" batch="$4"
+    local data="$1" id="$2" epochs="$3" batch="$4" wdl="${5:-0.4}"
     local bytes positions batches stamp net
     bytes=$(stat -c %s "$data")
     [ $((bytes % 32)) -eq 0 ] || { echo "$data is not whole 32-byte records" >&2; exit 1; }
@@ -252,9 +252,9 @@ train() {
     # positions per superbatch would loop a smaller file dozens of times each.
     batches=$(( (positions + batch - 1) / batch ))
     stamp=$(mktemp)
-    log "training $id on $positions positions: $epochs superbatches of $batches x $batch"
+    log "training $id on $positions positions: $epochs superbatches of $batches x $batch, wdl $wdl"
     with_cap "$TRAINER/target/release/newchessbot-trainer" --data "$data" --out "$NETS" \
-        --id "$id" --batch-size "$batch" --batches-per-superbatch "$batches" \
+        --id "$id" --wdl "$wdl" --batch-size "$batch" --batches-per-superbatch "$batches" \
         --superbatches "$epochs" --lr-step $((epochs * 45 / 100 > 0 ? epochs * 45 / 100 : 1))
     net=$(newest_net_since "$stamp")
     [ -n "$net" ] || { echo "training finished but wrote no .bin network" >&2; exit 1; }
@@ -280,11 +280,20 @@ all() {
     train "$SMOKE_DATA" smoke 20 1024
     netcheck_gate "$TRAINED_NET" "$SMOKE_TEXT"
 
-    train "$TRAIN_DATA" newchessbot "$EPOCHS" 16384
-    netcheck_gate "$TRAINED_NET" "$TRAIN_TEXT"
+    # One net per WDL weight. Training is seconds per net at this size, so a
+    # sweep costs almost nothing beyond the setup already paid for. WDL 0.0
+    # (search score only) is the control: it should all but reproduce the
+    # evaluation that labelled the data.
+    local wdl finals=""
+    for wdl in ${WDLS:-0.0 0.4}; do
+        train "$TRAIN_DATA" "newchessbot-wdl$wdl" "$EPOCHS" 16384 "$wdl"
+        netcheck_gate "$TRAINED_NET" "$TRAIN_TEXT"
+        finals="$finals $TRAINED_NET"
+    done
 
     log "done"
-    echo "final network: $TRAINED_NET"
+    echo "final networks:"
+    for net in $finals; do echo "  $net"; done
 }
 
 # Sourcing defines the functions without running anything, so the guardrails

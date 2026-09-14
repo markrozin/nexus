@@ -303,6 +303,16 @@ imperfect copy of the handcrafted evaluation it was labelled by, at half the
 nps. A net only beats its teacher once enough game-result signal (hundreds of
 millions of positions) or better labels outweigh the imitation.
 
+Ruled out, with `netcheck --mappings` on held-out positions: a feature
+mismatch with bullet. The engine's mapping fits best (r 0.915); the nearest
+wrong one, knight and bishop swapped, gives 0.888, and the rest collapse or go
+negative. Found instead: the net's centipawns run about 1.6x the labels
+(recorded = 0.615 * net), most likely from the WDL 0.4 blend pulling targets
+toward the result extremes. The next diagnostic is a WDL 0.0 net on the same
+data: it should reproduce the handcrafted evaluation almost exactly and play
+about level with it at fixed nodes. If it does not, something beyond data is
+wrong.
+
 **A slow verdict means a small effect.** The number of games SPRT needs falls as
 the true gain grows, because the LLR drifts in proportion to how far the effect
 sits from the midpoint of the two hypotheses. Our own runs are monotonic in it:
