@@ -55,7 +55,17 @@ SMOKE_TEXT="$DATA/tp8.dedup.txt"
 TRAIN_DATA="$DATA/pipeline.shuffled.data"
 TRAIN_TEXT="$DATA/pipeline.check.txt"
 
-LICHESS_URL="https://database.lichess.org/lichess_db_eval.jsonl.zst"
+# The deduplicated Lichess evaluations on Hugging Face (CC BY 4.0, derived from
+# the Lichess CC0 database): deepest evaluation per position, White-relative.
+# Streaming database.lichess.org directly failed -- it serves ~170 KB/s.
+HF_BASE="https://huggingface.co/datasets/mateuszgrzyb/lichess-stockfish-normalized/resolve/main"
+# name:bytes, as the Hugging Face API publishes them; downloads are checked
+# against these sizes.
+HF_FILES="train-00000.parquet:726163976 train-00001.parquet:727635731
+          train-00002.parquet:707292699 train-00003.parquet:667565315
+          train-00004.parquet:566154004 train-00005.parquet:575198222
+          train-00006.parquet:633174284 train-00007.parquet:684358333
+          train-00008.parquet:717004099 train-00009.parquet:552290895"
 # Must equal the rev in trainer/Cargo.toml, so bullet-utils writes exactly the
 # format the trainer reads. prepare.sh checks the two agree.
 BULLET_REV="629ee50000b2afb7b3337595401c830d3b1e0f42"
@@ -286,11 +296,12 @@ need_disk() {
     fi
 }
 
-# Stream the Lichess evaluation database into the converter, then turn the
-# result into shuffled bulletformat. Each intermediate is deleted once the next
-# stage has been verified, and none of the 22 GB download is ever stored.
+# Download the deduplicated Lichess evaluations from Hugging Face, convert the
+# ten parquet shards in parallel, and turn the result into shuffled
+# bulletformat. Each intermediate is deleted once the next stage is verified.
 prepare_lichess() {
-    local text="$DATA/lichess.txt" raw="$DATA/lichess.data" shuffled="$DATA/lichess.shuffled.data"
+    local work="$DATA/lichess" raw="$DATA/lichess.data" shuffled="$DATA/lichess.shuffled.data"
+    mkdir -p "$work"
 
     log "building bullet-utils at the trainer's bullet revision"
     with_cap cargo install --locked --git https://github.com/jw1912/bullet --rev "$BULLET_REV" \
@@ -299,38 +310,86 @@ prepare_lichess() {
 
     log "building lichesseval"
     (cd "$ENGINE" && with_cap cargo build --release --locked --features datagen --bin lichesseval)
+    local converter="$ENGINE/target/release/lichesseval"
 
-    log "streaming the Lichess evaluation database into lichesseval"
-    with_cap bash -c '
-        curl -sSfL --retry 3 "$1" | "$2" - "$3" $4
-        status=("${PIPESTATUS[@]}")
-        [ "${status[1]}" -eq 0 ] || exit "${status[1]}"
-        # With a MAX_POSITIONS limit the reader stops early and curl dies of
-        # SIGPIPE, which is expected. Without one, a curl failure is real.
-        [ -n "$4" ] || [ "${status[0]}" -eq 0 ] || exit "${status[0]}"
-    ' _ "$LICHESS_URL" "$ENGINE/target/release/lichesseval" "$text" "${MAX_POSITIONS:-}" \
-        2>&1 | tee "$DATA/lichesseval.log"
-    if [ -z "${MAX_POSITIONS:-}" ] && grep -q "mid-frame" "$DATA/lichesseval.log"; then
-        echo "WARNING: the download ended early; training on the positions that arrived." >&2
-    fi
+    log "installing pyarrow to read parquet"
+    # The image's Python lives in a venv that non-interactive shells do not
+    # activate, so name it directly when it is there.
+    local py=/venv/main/bin/python
+    [ -x "$py" ] || py=python3
+    with_cap "$py" -m pip install --quiet pyarrow
+    "$py" -c "import pyarrow" || { echo "pyarrow did not install" >&2; exit 1; }
 
-    local lines records errors
-    lines=$(wc -l < "$text")
-    # A sample for netcheck, taken before the text is deleted. It overlaps the
-    # training set, so it tests the pipeline, not generalisation.
-    shuf -n 200000 "$text" > "$DATA/lichess.check.txt"
+    local entry name size first=""
+    log "downloading the parquet shards"
+    for entry in $HF_FILES; do
+        name="${entry%%:*}"
+        size="${entry##*:}"
+        [ -n "$first" ] || first="$name"
+        with_cap curl -sSfL --retry 5 --retry-delay 5 -C - -o "$work/$name" "$HF_BASE/$name"
+        if [ "$(stat -c %s "$work/$name")" != "$size" ]; then
+            echo "$name is $(stat -c %s "$work/$name") bytes, expected $size" >&2
+            exit 1
+        fi
+        echo "$name  $size bytes"
+    done
 
-    log "converting $lines positions to bulletformat"
-    with_cap "$utils" convert --from text --input "$text" --output "$raw" --threads "$(nproc)" \
-        > "$DATA/convert.log"
-    tail -2 "$DATA/convert.log"
-    errors=$(grep -ci "error parsing" "$DATA/convert.log" || true)
-    records=$(( $(stat -c %s "$raw") / 32 ))
-    if [ "$errors" != 0 ] || [ "$records" != "$lines" ]; then
-        echo "conversion lost positions: $errors parse errors, $records records from $lines lines" >&2
-        exit 1
-    fi
-    rm -f "$text"
+    # The whole reader-to-converter path on real rows, before the long run.
+    log "trial: 200,000 rows of $first through parquet2tsv and lichesseval"
+    "$py" "$TRAINER/vast/parquet2tsv.py" "$work/$first" | head -200000 \
+        | "$converter" --tsv - "$work/trial.txt" 2> "$work/trial.log" \
+        || { cat "$work/trial.log" >&2; echo "the trial conversion failed" >&2; exit 1; }
+    grep -E "^kept|not quiet|r =|PASS" "$work/trial.log"
+    rm -f "$work/trial.txt"
+
+    log "converting all shards in parallel"
+    local left pids="" pid failed=0
+    left=$(remaining_seconds)
+    [ "$left" -gt 60 ] || { echo "SPENDING CAP REACHED: not starting the conversion" >&2; exit 3; }
+    for entry in $HF_FILES; do
+        name="${entry%%:*}"
+        timeout --signal=INT --kill-after=60 "$left" bash -c '
+            set -o pipefail
+            "$1" "$2" "$3" | "$4" --tsv - "$5" $6
+        ' _ "$py" "$TRAINER/vast/parquet2tsv.py" "$work/$name" "$converter" "$work/$name.txt" \
+            "${MAX_POSITIONS:+$((MAX_POSITIONS / 10))}" 2> "$work/$name.log" &
+        pids="$pids $!"
+    done
+    for pid in $pids; do
+        wait "$pid" || failed=1
+    done
+    for entry in $HF_FILES; do
+        name="${entry%%:*}"
+        echo "$name: $(grep -E '^kept|PASS|FAIL' "$work/$name.log" | tr -s ' ' | tr '\n' ' ')"
+    done
+    [ "$failed" = 0 ] || { echo "a shard failed to convert; see $work/*.log" >&2; exit 1; }
+    rm -f "$work"/*.parquet
+
+    log "converting to bulletformat, shard by shard"
+    local lines records errors total=0
+    : > "$raw"
+    : > "$DATA/lichess.check.txt"
+    for entry in $HF_FILES; do
+        name="${entry%%:*}"
+        lines=$(wc -l < "$work/$name.txt")
+        # A slice of every shard for netcheck, taken before the text is
+        # deleted. It overlaps the training set, so it tests the pipeline, not
+        # generalisation.
+        shuf -n 20000 "$work/$name.txt" >> "$DATA/lichess.check.txt"
+        with_cap "$utils" convert --from text --input "$work/$name.txt" --output "$work/$name.data" \
+            --threads "$(nproc)" > "$work/$name.convert.log"
+        errors=$(grep -ci "error parsing" "$work/$name.convert.log" || true)
+        records=$(( $(stat -c %s "$work/$name.data") / 32 ))
+        if [ "$errors" != 0 ] || [ "$records" != "$lines" ]; then
+            echo "$name lost positions: $errors parse errors, $records records from $lines lines" >&2
+            exit 1
+        fi
+        # Whole 32-byte records, so shards concatenate into one valid file.
+        cat "$work/$name.data" >> "$raw"
+        rm -f "$work/$name.txt" "$work/$name.data"
+        total=$((total + records))
+    done
+    echo "$total positions in bulletformat"
 
     log "validating"
     "$utils" validate --input "$raw" > "$DATA/validate.log"
