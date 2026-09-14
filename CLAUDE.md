@@ -514,6 +514,11 @@ at 7.3M positions/sec. GPU time is not the constraint at this net size --
 data is. Destroy by hand as soon as the network is downloaded and verified
 rather than waiting out the download window.
 
+Lichess sessions (`prepare.sh --lichess`, then `run.sh lichess`) download the
+database on the instance, so rent with at least 100 GB of disk and a fast
+connection, and set `MAX_DOLLARS` for a multi-hour run: streaming and
+converting ~410M lines single-threaded is the long pole, not training.
+
 Running from the browser: the Jupyter "direct HTTPS" links need vast's root
 certificate installed, which changes browser security settings -- don't. The
 Instance Portal (plain HTTP on the instance IP) lists Cloudflare tunnels with
