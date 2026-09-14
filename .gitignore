@@ -31,3 +31,7 @@
 # Local copies of external tools (bullet-utils), and the upload bundle
 /tools
 /dist
+
+# Match logs and PGNs, and the tallies fastchess leaves in its working directory
+/sprt
+/config.json
