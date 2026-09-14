@@ -189,6 +189,47 @@ impl Network {
     pub fn evaluate_position(&self, pos: &Position) -> i32 {
         self.evaluate(&Accumulator::refresh(pos, self), pos.side_to_move())
     }
+
+    /// Evaluate through an arbitrary feature mapping, optionally with the two
+    /// accumulator halves swapped.
+    ///
+    /// A diagnostic for a suspected mismatch with the trainer, used by
+    /// `netcheck --mappings`: the mapping bullet actually trained with should
+    /// fit held-out data best, by a clear margin. A subtly wrong one -- two
+    /// piece types swapped, say -- still yields sane material values and a
+    /// respectable correlation, so nothing short of this comparison exposes it.
+    /// Rebuilds from scratch on every call; never use it in search.
+    pub fn evaluate_mapped(
+        &self,
+        pos: &Position,
+        map: &dyn Fn(Color, Piece, Square) -> usize,
+        swap_halves: bool,
+    ) -> i32 {
+        let mut acc = Accumulator {
+            values: [[0; HIDDEN]; Color::COUNT],
+        };
+        for perspective in Color::ALL {
+            acc.values[perspective.index()].copy_from_slice(&self.feature_bias);
+        }
+        for sq in Square::ALL {
+            if let Some(piece) = pos.piece_at(sq) {
+                for perspective in Color::ALL {
+                    let column = self.column(map(perspective, piece, sq));
+                    for (value, weight) in acc.values[perspective.index()].iter_mut().zip(column) {
+                        *value = value.wrapping_add(*weight);
+                    }
+                }
+            }
+        }
+        // Reading the accumulators as if the other side were to move puts the
+        // opponent's half first: exactly a swap of the two halves.
+        let first = if swap_halves {
+            pos.side_to_move().flip()
+        } else {
+            pos.side_to_move()
+        };
+        self.evaluate(&acc, first)
+    }
 }
 
 /// Squared clipped ReLU on a QA-scaled value.
@@ -479,6 +520,20 @@ mod tests {
             let mut acc = Accumulator::refresh(&pos, &net);
             acc.update(&net, &pos, &next);
             assert_eq!(acc, Accumulator::refresh(&next, &net), "{uci} in {fen}");
+        }
+    }
+
+    #[test]
+    fn mapped_evaluation_with_the_engine_mapping_is_the_normal_evaluation() {
+        // The diagnostic is only meaningful if its baseline row is the real
+        // evaluation, bit for bit.
+        let net = synthetic(5);
+        for fen in [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r1bqkbnr/pppp1ppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3",
+        ] {
+            let pos: Position = fen.parse().unwrap();
+            assert_eq!(net.evaluate_mapped(&pos, &feature, false), net.evaluate_position(&pos));
         }
     }
 
