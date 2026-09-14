@@ -220,6 +220,23 @@ arm_cleanup() {
     echo "self-destroy armed: any exit from here ends in a destroyed instance"
 }
 
+# A second, independent killer. The trap above runs only if this script gets to
+# exit; a hung step inside the download window, a kill -9, or a bug in cleanup
+# would skip it. This detached process waits out the whole spending cap plus
+# five minutes and destroys the instance regardless -- no KEEP_INSTANCE opt-out.
+arm_hard_deadline() {
+    if [ "${NO_AUTODESTROY:-0}" = 1 ]; then
+        return
+    fi
+    local deadline=$((CAP_SECONDS + 300))
+    setsid nohup bash -c '
+        sleep "$1"
+        curl -sS -X DELETE "https://console.vast.ai/api/v0/instances/$2/" \
+            -H "Authorization: Bearer $3" > /tmp/hard-deadline.log 2>&1
+    ' _ "$deadline" "$CONTAINER_ID" "$CONTAINER_API_KEY" > /dev/null 2>&1 < /dev/null &
+    echo "hard deadline armed: destroyed $((deadline / 60)) minutes from now, whatever else happens"
+}
+
 # ---------------------------------------------------------------------------
 # The work.
 # ---------------------------------------------------------------------------
@@ -427,6 +444,7 @@ session() {
         need_disk "$MIN_FREE_GB_LICHESS"
     fi
     arm_cleanup
+    arm_hard_deadline
 
     need_rust
     build
