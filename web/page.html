@@ -1,0 +1,641 @@
+<title>Nexus Chess</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@400;600;800&family=Chivo+Mono:wght@400;600&display=swap">
+<style>
+  :root {
+    --bg: #f4f5f3;
+    --surface: #ffffff;
+    --ink: #15181b;
+    --muted: #5e6772;
+    --line: #dcded8;
+    --light-square: #ede8dd;
+    --dark-square: #5f7a6e;
+    --signal: #0e7c86;
+    --brass: #c08a2e;
+    --white-piece: #fbfbf8;
+    --white-piece-edge: #2a2f33;
+    --black-piece: #1d2225;
+    --shadow: 0 1px 2px rgba(21, 24, 27, .08), 0 8px 24px rgba(21, 24, 27, .06);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #101314;
+      --surface: #171b1d;
+      --ink: #e9ede9;
+      --muted: #97a29b;
+      --line: #272d2f;
+      --light-square: #cfc7b6;
+      --dark-square: #4c6459;
+      --signal: #39b0ab;
+      --brass: #d9a441;
+      --white-piece: #f6f4ee;
+      --white-piece-edge: #1a1d1f;
+      --black-piece: #14181a;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 10px 28px rgba(0, 0, 0, .35);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --bg: #101314;
+    --surface: #171b1d;
+    --ink: #e9ede9;
+    --muted: #97a29b;
+    --line: #272d2f;
+    --light-square: #cfc7b6;
+    --dark-square: #4c6459;
+    --signal: #39b0ab;
+    --brass: #d9a441;
+    --white-piece: #f6f4ee;
+    --white-piece-edge: #1a1d1f;
+    --black-piece: #14181a;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 10px 28px rgba(0, 0, 0, .35);
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Chivo", ui-sans-serif, system-ui, sans-serif;
+    line-height: 1.5;
+    padding-inline: 20px;
+    padding-block: 28px 40px;
+  }
+
+  .wrap { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
+
+  header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  .wordmark {
+    font-family: "Chivo Mono", ui-monospace, monospace;
+    font-weight: 600; font-size: 1.45rem; letter-spacing: .22em; text-transform: uppercase;
+    margin: 0;
+  }
+  .tagline { color: var(--muted); font-size: .92rem; margin: 0; }
+  .tagline strong { color: var(--ink); font-weight: 600; }
+
+  .game { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 22px; align-items: start; }
+  @media (max-width: 820px) { .game { grid-template-columns: minmax(0, 1fr); } }
+
+  .board-area { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 10px; }
+
+  .evalbar {
+    position: relative; border-radius: 4px; overflow: hidden;
+    background: var(--black-piece); border: 1px solid var(--line);
+    aspect-ratio: 26 / 560; height: 100%;
+  }
+  .evalbar .white-share {
+    position: absolute; left: 0; right: 0; bottom: 0; background: var(--white-piece);
+    transition: height .35s ease;
+  }
+  .evalbar .midline { position: absolute; left: 0; right: 0; top: 50%; height: 1px; background: var(--signal); opacity: .65; }
+
+  .board {
+    display: grid; grid-template-columns: repeat(8, 1fr); aspect-ratio: 1;
+    border: 1px solid var(--line); border-radius: 6px; overflow: hidden; box-shadow: var(--shadow);
+    touch-action: manipulation;
+  }
+  .sq {
+    position: relative; display: flex; align-items: center; justify-content: center;
+    border: 0; padding: 0; cursor: pointer; background: var(--light-square);
+    font-size: clamp(26px, 6.4vw, 46px); line-height: 1;
+  }
+  .sq.dark { background: var(--dark-square); }
+  .sq:disabled { cursor: default; }
+  .sq:focus-visible { outline: 2px solid var(--signal); outline-offset: -3px; }
+  .sq .piece { pointer-events: none; }
+  .sq .piece.w { color: var(--white-piece); text-shadow: 0 0 1px var(--white-piece-edge), 0 1px 0 var(--white-piece-edge), 1px 0 0 var(--white-piece-edge), -1px 0 0 var(--white-piece-edge), 0 -1px 0 var(--white-piece-edge); }
+  .sq .piece.b { color: var(--black-piece); }
+  .sq.last::after {
+    content: ""; position: absolute; inset: 0; background: var(--brass); opacity: .26; pointer-events: none;
+  }
+  .sq.selected::after {
+    content: ""; position: absolute; inset: 0; box-shadow: inset 0 0 0 3px var(--signal); pointer-events: none;
+  }
+  .sq .hint {
+    position: absolute; width: 26%; height: 26%; border-radius: 50%;
+    background: var(--signal); opacity: .5; pointer-events: none;
+  }
+  .sq .hint.capture { width: 82%; height: 82%; border-radius: 50%; background: none; box-shadow: inset 0 0 0 4px var(--signal); opacity: .55; }
+  .sq .coord {
+    position: absolute; font-family: "Chivo Mono", ui-monospace, monospace; font-size: 9px;
+    color: var(--ink); opacity: .45; pointer-events: none;
+  }
+  .sq .coord.file { right: 3px; bottom: 1px; }
+  .sq .coord.rank { left: 3px; top: 1px; }
+
+  .panel {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+    padding: 16px; display: flex; flex-direction: column; gap: 16px; box-shadow: var(--shadow);
+  }
+
+  .status { display: flex; flex-direction: column; gap: 4px; }
+  .status .turn { font-weight: 600; font-size: 1.02rem; }
+  .status .detail { color: var(--muted); font-size: .86rem; min-height: 1.3em; }
+
+  .readout { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+  .readout div { display: flex; flex-direction: column; gap: 2px; }
+  .label {
+    font-family: "Chivo Mono", ui-monospace, monospace; font-size: .64rem; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .value { font-family: "Chivo Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; font-size: 1.05rem; }
+  .value.signal { color: var(--signal); }
+
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; }
+  button.action, select {
+    font: inherit; font-size: .88rem; color: var(--ink); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 6px; padding: 7px 11px; cursor: pointer;
+  }
+  button.action:hover:not(:disabled), select:hover { border-color: var(--signal); }
+  button.action:disabled { opacity: .5; cursor: default; }
+  .field { display: flex; flex-direction: column; gap: 4px; flex: 1 1 130px; }
+
+  .moves { border-top: 1px solid var(--line); padding-top: 12px; }
+  .moves ol {
+    margin: 0; padding: 0; list-style: none; max-height: 210px; overflow-y: auto;
+    font-family: "Chivo Mono", ui-monospace, monospace; font-size: .82rem;
+    display: grid; grid-template-columns: 2.4rem 1fr 1fr; gap: 2px 8px; align-content: start;
+  }
+  .moves .num { color: var(--muted); }
+  .moves .ply.engine { color: var(--signal); }
+  .moves .empty { grid-column: 1 / -1; color: var(--muted); font-family: "Chivo", sans-serif; }
+
+  .fen {
+    font-family: "Chivo Mono", ui-monospace, monospace; font-size: .7rem; color: var(--muted);
+    word-break: break-all; border-top: 1px solid var(--line); padding-top: 10px;
+  }
+
+  .promo { display: flex; gap: 6px; align-items: center; }
+  .promo button { font-size: 1.5rem; line-height: 1; padding: 4px 8px; }
+
+  footer { color: var(--muted); font-size: .8rem; border-top: 1px solid var(--line); padding-top: 14px; }
+  footer a { color: var(--signal); }
+
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1 class="wordmark">Nexus</h1>
+    <p class="tagline">A chess engine written from scratch in Rust — <strong>bitboards, alpha-beta search, NNUE evaluation</strong> — compiled to WebAssembly and running in this tab.</p>
+  </header>
+
+  <div class="game">
+    <div class="board-area">
+      <div class="evalbar" title="Evaluation, white at the bottom">
+        <div class="white-share" id="white-share" style="height: 50%"></div>
+        <div class="midline"></div>
+      </div>
+      <div class="board" id="board" role="grid" aria-label="Chess board"></div>
+    </div>
+
+    <div class="panel">
+      <div class="status">
+        <div class="turn" id="turn">Your move</div>
+        <div class="detail" id="detail">You are White. Click a piece, then its destination.</div>
+      </div>
+
+      <div class="readout">
+        <div>
+          <span class="label">Eval</span>
+          <span class="value signal" id="score">+0.00</span>
+        </div>
+        <div>
+          <span class="label">Depth</span>
+          <span class="value" id="depth">—</span>
+        </div>
+        <div>
+          <span class="label">Nodes</span>
+          <span class="value" id="nodes">—</span>
+        </div>
+      </div>
+
+      <div class="controls">
+        <div class="field">
+          <label class="label" for="level">Strength</label>
+          <select id="level">
+            <option value="4000">Casual · 4k nodes</option>
+            <option value="60000">Club · 60k nodes</option>
+            <option value="400000" selected>Strong · 400k nodes</option>
+            <option value="2000000">Full · 2M nodes</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="label" for="side">You play</label>
+          <select id="side">
+            <option value="w" selected>White</option>
+            <option value="b">Black</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="controls">
+        <button class="action" id="new">New game</button>
+        <button class="action" id="undo">Take back</button>
+        <button class="action" id="flip">Flip board</button>
+      </div>
+
+      <div class="promo" id="promo" hidden>
+        <span class="label">Promote to</span>
+        <button class="action" data-promo="q">♛</button>
+        <button class="action" data-promo="r">♜</button>
+        <button class="action" data-promo="b">♝</button>
+        <button class="action" data-promo="n">♞</button>
+      </div>
+
+      <div class="moves">
+        <span class="label">Moves</span>
+        <ol id="movelist"><li class="empty">No moves yet.</li></ol>
+      </div>
+
+      <div class="fen" id="fen"></div>
+    </div>
+  </div>
+
+  <footer>
+    Nexus searches with alpha-beta, quiescence, a transposition table, null-move pruning and late move reductions, and
+    evaluates positions with a 768→128×2→1 network trained on 191.5 million positions from the
+    <a href="https://database.lichess.org/">Lichess evaluation database</a> (CC0). Strength here is set by node count,
+    because WebAssembly has no clock for the engine to time itself by.
+  </footer>
+</div>
+
+<script>
+  const WASM_BASE64 = "__WASM_BASE64__";
+
+  const GLYPH = { k: "♚", q: "♛", r: "♜", b: "♝", n: "♞", p: "♟" };
+  const START = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
+  const el = {
+    board: document.getElementById("board"),
+    turn: document.getElementById("turn"),
+    detail: document.getElementById("detail"),
+    score: document.getElementById("score"),
+    depth: document.getElementById("depth"),
+    nodes: document.getElementById("nodes"),
+    level: document.getElementById("level"),
+    side: document.getElementById("side"),
+    newGame: document.getElementById("new"),
+    undo: document.getElementById("undo"),
+    flip: document.getElementById("flip"),
+    promo: document.getElementById("promo"),
+    movelist: document.getElementById("movelist"),
+    fen: document.getElementById("fen"),
+    whiteShare: document.getElementById("white-share")
+  };
+
+  const state = {
+    fen: START,
+    history: [],
+    playerColor: "w",
+    orientation: "w",
+    selected: null,
+    targets: [],
+    pending: null,
+    thinking: false,
+    lastMove: null,
+    engine: null
+  };
+
+  // --- WebAssembly glue -----------------------------------------------------
+  let api = null;
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  let outPtr = 0;
+  const OUT_CAPACITY = 8192;
+
+  function bytes() {
+    return new Uint8Array(api.memory.buffer);
+  }
+
+  function pushString(text) {
+    const encoded = encoder.encode(text);
+    const ptr = api.alloc(encoded.length);
+    bytes().set(encoded, ptr);
+    return { ptr, len: encoded.length };
+  }
+
+  function readOut(written) {
+    if (written < 0) return null;
+    return decoder.decode(bytes().subarray(outPtr, outPtr + written));
+  }
+
+  function legalMoves(fen) {
+    const f = pushString(fen);
+    const written = api.legal_moves(f.ptr, f.len, outPtr, OUT_CAPACITY);
+    api.dealloc(f.ptr, f.len);
+    const text = readOut(written);
+    return text ? text.split(" ").filter(Boolean) : [];
+  }
+
+  function applyMove(fen, move) {
+    const f = pushString(fen);
+    const m = pushString(move);
+    const written = api.apply_move(f.ptr, f.len, m.ptr, m.len, outPtr, OUT_CAPACITY);
+    const result = readOut(written);
+    api.dealloc(f.ptr, f.len);
+    api.dealloc(m.ptr, m.len);
+    return result;
+  }
+
+  function statusOf(fen) {
+    const f = pushString(fen);
+    const written = api.status(f.ptr, f.len, outPtr, OUT_CAPACITY);
+    api.dealloc(f.ptr, f.len);
+    return readOut(written) || "ok";
+  }
+
+  function search(fen, nodes) {
+    const f = pushString(fen);
+    const written = api.best_move(f.ptr, f.len, BigInt(nodes), outPtr, OUT_CAPACITY);
+    api.dealloc(f.ptr, f.len);
+    const text = readOut(written);
+    if (!text) return null;
+    const parts = text.split(" ");
+    const mate = parts[1] === "mate";
+    return {
+      move: parts[0],
+      mate: mate,
+      score: Number(mate ? parts[2] : parts[1]),
+      depth: Number(parts[mate ? 3 : 2]),
+      nodes: Number(parts[mate ? 4 : 3])
+    };
+  }
+
+  async function boot() {
+    const binary = Uint8Array.from(atob(WASM_BASE64), (c) => c.charCodeAt(0));
+    const { instance } = await WebAssembly.instantiate(binary, {});
+    api = instance.exports;
+    outPtr = api.alloc(OUT_CAPACITY);
+    newGame();
+  }
+
+  // --- Position helpers -----------------------------------------------------
+  function boardFromFen(fen) {
+    const rows = fen.split(" ")[0].split("/");
+    const squares = {};
+    rows.forEach((row, rankIndex) => {
+      let file = 0;
+      for (const ch of row) {
+        if (ch >= "1" && ch <= "8") {
+          file += Number(ch);
+          continue;
+        }
+        const name = "abcdefgh"[file] + (8 - rankIndex);
+        squares[name] = { type: ch.toLowerCase(), color: ch === ch.toUpperCase() ? "w" : "b" };
+        file += 1;
+      }
+    });
+    return squares;
+  }
+
+  const sideToMove = (fen) => fen.split(" ")[1];
+
+  function formatScore(result) {
+    if (!result) return "+0.00";
+    if (result.mate) return (result.score > 0 ? "mate in " : "mated in ") + Math.abs(result.score);
+    const pawns = result.score / 100;
+    return (pawns >= 0 ? "+" : "") + pawns.toFixed(2);
+  }
+
+  // Engine scores are from the side to move; the bar is always White's share.
+  function evalShare(result, fen) {
+    if (!result) return 50;
+    const whiteScore = sideToMove(fen) === "w" ? result.score : -result.score;
+    if (result.mate) return whiteScore > 0 ? 100 : 0;
+    const clamped = Math.max(-900, Math.min(900, whiteScore));
+    return 50 + (clamped / 900) * 50;
+  }
+
+  // --- Rendering ------------------------------------------------------------
+  function render() {
+    const squares = boardFromFen(state.fen);
+    const files = state.orientation === "w" ? "abcdefgh".split("") : "hgfedcba".split("");
+    const ranks = state.orientation === "w" ? [8, 7, 6, 5, 4, 3, 2, 1] : [1, 2, 3, 4, 5, 6, 7, 8];
+
+    el.board.replaceChildren();
+    for (const rank of ranks) {
+      for (const file of files) {
+        const name = file + rank;
+        const piece = squares[name];
+        const dark = ("abcdefgh".indexOf(file) + rank) % 2 === 0;
+        const square = document.createElement("button");
+        square.className = "sq" + (dark ? " dark" : "");
+        square.dataset.square = name;
+        square.setAttribute("aria-label", name + (piece ? ", " + piece.color + piece.type : ", empty"));
+
+        if (state.selected === name) square.classList.add("selected");
+        if (state.lastMove && (state.lastMove.slice(0, 2) === name || state.lastMove.slice(2, 4) === name)) {
+          square.classList.add("last");
+        }
+        if (piece) {
+          const glyph = document.createElement("span");
+          glyph.className = "piece " + piece.color;
+          glyph.textContent = GLYPH[piece.type];
+          square.append(glyph);
+        }
+        if (state.targets.includes(name)) {
+          const hint = document.createElement("span");
+          hint.className = "hint" + (piece ? " capture" : "");
+          square.append(hint);
+        }
+        if (rank === ranks[ranks.length - 1]) {
+          const coord = document.createElement("span");
+          coord.className = "coord file";
+          coord.textContent = file;
+          square.append(coord);
+        }
+        if (file === files[0]) {
+          const coord = document.createElement("span");
+          coord.className = "coord rank";
+          coord.textContent = rank;
+          square.append(coord);
+        }
+        square.disabled = state.thinking;
+        el.board.append(square);
+      }
+    }
+
+    el.fen.textContent = state.fen;
+    el.whiteShare.style.height = evalShare(state.engine, state.fen) + "%";
+    el.score.textContent = formatScore(state.engine);
+    el.depth.textContent = state.engine ? state.engine.depth : "—";
+    el.nodes.textContent = state.engine ? state.engine.nodes.toLocaleString() : "—";
+    el.undo.disabled = state.history.length < 2 || state.thinking;
+    renderMoves();
+  }
+
+  function renderMoves() {
+    el.movelist.replaceChildren();
+    if (state.history.length === 0) {
+      const empty = document.createElement("li");
+      empty.className = "empty";
+      empty.textContent = "No moves yet.";
+      el.movelist.append(empty);
+      return;
+    }
+    for (let i = 0; i < state.history.length; i += 2) {
+      const num = document.createElement("li");
+      num.className = "num";
+      num.textContent = (i / 2 + 1) + ".";
+      el.movelist.append(num);
+      for (const entry of [state.history[i], state.history[i + 1]]) {
+        const cell = document.createElement("li");
+        cell.className = "ply" + (entry && entry.byEngine ? " engine" : "");
+        cell.textContent = entry ? entry.move : "";
+        el.movelist.append(cell);
+      }
+    }
+    el.movelist.scrollTop = el.movelist.scrollHeight;
+  }
+
+  function setStatus(turn, detail) {
+    el.turn.textContent = turn;
+    el.detail.textContent = detail;
+  }
+
+  // --- Game flow ------------------------------------------------------------
+  function newGame() {
+    state.fen = START;
+    state.history = [];
+    state.selected = null;
+    state.targets = [];
+    state.lastMove = null;
+    state.engine = null;
+    state.thinking = false;
+    state.playerColor = el.side.value;
+    state.orientation = state.playerColor;
+    setStatus("Your move", state.playerColor === "w" ? "You are White. Click a piece, then its destination." : "You are Black. Nexus opens.");
+    render();
+    if (sideToMove(state.fen) !== state.playerColor) engineTurn();
+  }
+
+  function finished(status) {
+    const loser = sideToMove(state.fen) === "w" ? "White" : "Black";
+    if (status === "checkmate") {
+      const youWon = sideToMove(state.fen) !== state.playerColor;
+      setStatus(youWon ? "You win" : "Nexus wins", "Checkmate — " + loser + " has no legal move.");
+      return true;
+    }
+    if (status === "stalemate") {
+      setStatus("Draw", "Stalemate — " + loser + " has no legal move and is not in check.");
+      return true;
+    }
+    if (status === "insufficient") {
+      setStatus("Draw", "Neither side has enough material to mate.");
+      return true;
+    }
+    if (status === "fifty") {
+      setStatus("Draw", "Fifty moves without a capture or a pawn move.");
+      return true;
+    }
+    return false;
+  }
+
+  function play(move, byEngine) {
+    const next = applyMove(state.fen, move);
+    if (!next) return false;
+    state.history.push({ move, byEngine });
+    state.fen = next;
+    state.lastMove = move;
+    state.selected = null;
+    state.targets = [];
+    return true;
+  }
+
+  function afterMove() {
+    const status = statusOf(state.fen);
+    render();
+    if (finished(status)) return;
+    if (sideToMove(state.fen) === state.playerColor) {
+      setStatus("Your move", status === "check" ? "You are in check." : "Nexus is waiting.");
+    } else {
+      engineTurn(status === "check");
+    }
+  }
+
+  function engineTurn(inCheck) {
+    state.thinking = true;
+    setStatus("Nexus is thinking", inCheck ? "It is in check." : "Searching " + Number(el.level.value).toLocaleString() + " nodes.");
+    render();
+    // Yield first so the board repaints with the player's move before the
+    // search blocks this thread.
+    setTimeout(() => {
+      const result = search(state.fen, Number(el.level.value));
+      state.thinking = false;
+      if (!result || result.move === "0000") {
+        render();
+        return;
+      }
+      state.engine = result;
+      play(result.move, true);
+      const status = statusOf(state.fen);
+      render();
+      if (finished(status)) return;
+      setStatus("Your move", "Nexus played " + result.move + " at depth " + result.depth + (status === "check" ? ". You are in check." : "."));
+    }, 30);
+  }
+
+  function selectSquare(name) {
+    if (state.thinking) return;
+    if (sideToMove(state.fen) !== state.playerColor) return;
+
+    if (state.selected) {
+      const candidates = legalMoves(state.fen).filter(
+        (m) => m.slice(0, 2) === state.selected && m.slice(2, 4) === name
+      );
+      if (candidates.length === 1) {
+        play(candidates[0], false);
+        afterMove();
+        return;
+      }
+      if (candidates.length > 1) {
+        state.pending = { from: state.selected, to: name };
+        el.promo.hidden = false;
+        setStatus("Choose a piece", "Your pawn reaches the last rank.");
+        return;
+      }
+    }
+
+    const moves = legalMoves(state.fen).filter((m) => m.slice(0, 2) === name);
+    state.selected = moves.length ? name : null;
+    state.targets = moves.map((m) => m.slice(2, 4));
+    render();
+  }
+
+  el.board.addEventListener("click", (event) => {
+    const square = event.target.closest(".sq");
+    if (square) selectSquare(square.dataset.square);
+  });
+
+  el.promo.addEventListener("click", (event) => {
+    const choice = event.target.closest("[data-promo]");
+    if (!choice || !state.pending) return;
+    const move = state.pending.from + state.pending.to + choice.dataset.promo;
+    el.promo.hidden = true;
+    state.pending = null;
+    if (play(move, false)) afterMove();
+  });
+
+  el.newGame.addEventListener("click", newGame);
+  el.side.addEventListener("change", newGame);
+  el.flip.addEventListener("click", () => {
+    state.orientation = state.orientation === "w" ? "b" : "w";
+    render();
+  });
+  el.undo.addEventListener("click", () => {
+    if (state.thinking || state.history.length < 2) return;
+    // Both plies, so it is the player's move again.
+    state.history.splice(-2);
+    state.fen = START;
+    for (const entry of state.history) state.fen = applyMove(state.fen, entry.move);
+    state.lastMove = state.history.length ? state.history[state.history.length - 1].move : null;
+    state.selected = null;
+    state.targets = [];
+    state.engine = null;
+    setStatus("Your move", "Took back a move.");
+    render();
+  });
+
+  boot().catch((error) => {
+    setStatus("Nexus could not start", String(error));
+  });
+</script>

@@ -17,6 +17,7 @@
 //! documented in `CLAUDE.md` at the repository root.
 
 pub mod bitboard;
+pub mod clock;
 pub mod board;
 pub mod eval;
 pub mod magic;

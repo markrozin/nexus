@@ -32,6 +32,18 @@ the Lichess evaluation database. Load one without rebuilding:
 `<handcrafted>` selects the piece-square evaluation, `<embedded>` the network
 compiled into the binary.
 
+## Playing in a browser
+
+`web/` compiles the engine to WebAssembly behind a small C ABI (no
+wasm-bindgen) and `web/build.sh` inlines the module into a single self-contained
+page:
+
+    rustup target add wasm32-unknown-unknown
+    bash web/build.sh              # writes dist/web/nexus.html
+
+Open that file in any browser to play. Strength is set by node count per move,
+because WebAssembly has no clock for the engine to time itself by.
+
 ## Training
 
 `trainer/` is a separate crate that trains networks with
