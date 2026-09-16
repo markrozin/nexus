@@ -51,6 +51,8 @@
     --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 10px 28px rgba(0, 0, 0, .35);
   }
 
+  [hidden] { display: none !important; }
+
   body {
     background: var(--bg);
     color: var(--ink);
@@ -79,7 +81,7 @@
   .evalbar {
     position: relative; border-radius: 4px; overflow: hidden;
     background: var(--black-piece); border: 1px solid var(--line);
-    aspect-ratio: 26 / 560; height: 100%;
+    align-self: stretch; min-height: 220px;
   }
   .evalbar .white-share {
     position: absolute; left: 0; right: 0; bottom: 0; background: var(--white-piece);
@@ -389,19 +391,26 @@
 
   const sideToMove = (fen) => fen.split(" ")[1];
 
+  // The engine scores from the side it searched for, which is recorded on the
+  // result; everything shown to the player is White-relative, as chess
+  // interfaces always are.
+  function whiteScore(result) {
+    return result.mover === "w" ? result.score : -result.score;
+  }
+
   function formatScore(result) {
     if (!result) return "+0.00";
-    if (result.mate) return (result.score > 0 ? "mate in " : "mated in ") + Math.abs(result.score);
-    const pawns = result.score / 100;
+    const score = whiteScore(result);
+    if (result.mate) return (score > 0 ? "White mates in " : "Black mates in ") + Math.abs(score);
+    const pawns = score / 100;
     return (pawns >= 0 ? "+" : "") + pawns.toFixed(2);
   }
 
-  // Engine scores are from the side to move; the bar is always White's share.
-  function evalShare(result, fen) {
+  function evalShare(result) {
     if (!result) return 50;
-    const whiteScore = sideToMove(fen) === "w" ? result.score : -result.score;
-    if (result.mate) return whiteScore > 0 ? 100 : 0;
-    const clamped = Math.max(-900, Math.min(900, whiteScore));
+    const score = whiteScore(result);
+    if (result.mate) return score > 0 ? 100 : 0;
+    const clamped = Math.max(-900, Math.min(900, score));
     return 50 + (clamped / 900) * 50;
   }
 
@@ -416,7 +425,7 @@
       for (const file of files) {
         const name = file + rank;
         const piece = squares[name];
-        const dark = ("abcdefgh".indexOf(file) + rank) % 2 === 0;
+        const dark = ("abcdefgh".indexOf(file) + rank) % 2 === 1;
         const square = document.createElement("button");
         square.className = "sq" + (dark ? " dark" : "");
         square.dataset.square = name;
@@ -455,7 +464,7 @@
     }
 
     el.fen.textContent = state.fen;
-    el.whiteShare.style.height = evalShare(state.engine, state.fen) + "%";
+    el.whiteShare.style.height = evalShare(state.engine) + "%";
     el.score.textContent = formatScore(state.engine);
     el.depth.textContent = state.engine ? state.engine.depth : "—";
     el.nodes.textContent = state.engine ? state.engine.nodes.toLocaleString() : "—";
@@ -559,12 +568,14 @@
     // Yield first so the board repaints with the player's move before the
     // search blocks this thread.
     setTimeout(() => {
+      const mover = sideToMove(state.fen);
       const result = search(state.fen, Number(el.level.value));
       state.thinking = false;
       if (!result || result.move === "0000") {
         render();
         return;
       }
+      result.mover = mover;
       state.engine = result;
       play(result.move, true);
       const status = statusOf(state.fen);
