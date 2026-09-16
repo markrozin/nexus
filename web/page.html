@@ -62,13 +62,18 @@
   .evalbar .midline { position: absolute; left: 0; right: 0; top: 50%; height: 1px; background: var(--signal); opacity: .65; }
 
   .board {
-    display: grid; grid-template-columns: repeat(8, 1fr); aspect-ratio: 1;
+    /* Rows must be declared as well as columns: with columns alone each row
+       sizes to its contents, so ranks holding pieces grow and empty ranks
+       collapse. Eight equal rows in a square box give 64 equal squares. */
+    display: grid; grid-template-columns: repeat(8, 1fr); grid-template-rows: repeat(8, 1fr);
+    aspect-ratio: 1;
     border: 1px solid var(--line); border-radius: 6px; overflow: hidden; box-shadow: var(--shadow);
     touch-action: manipulation;
   }
   .sq {
     position: relative; display: flex; align-items: center; justify-content: center;
     border: 0; padding: 0; cursor: pointer; background: var(--light-square);
+    min-width: 0; min-height: 0;
     font-size: clamp(20px, 6.6vh, 42px); line-height: 1;
   }
   .sq.dark { background: var(--dark-square); }
