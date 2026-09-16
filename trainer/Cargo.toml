@@ -1,9 +1,9 @@
 [package]
-name = "newchessbot-trainer"
+name = "nexus-trainer"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Trains the newchessbot NNUE with bullet. Deliberately outside the engine workspace."
+description = "Trains the nexus NNUE with bullet. Deliberately outside the engine workspace."
 
 # Its own workspace, on purpose. bullet pulls in a large dependency tree that
 # must never leak into the engine, whose whole dependency list is arrayvec plus

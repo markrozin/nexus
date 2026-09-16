@@ -28,9 +28,9 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::process::ExitCode;
 
-use newchessbot::board::Position;
-use newchessbot::eval::evaluate;
-use newchessbot::types::Color;
+use nexus::board::Position;
+use nexus::eval::evaluate;
+use nexus::types::Color;
 
 /// Must match `QUIET_MARGIN_SEARCH` in datagen. Allow one centipawn of slack:
 /// nothing here is rounded, but a check that fails on its own boundary is worse

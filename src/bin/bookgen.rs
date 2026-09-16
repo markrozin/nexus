@@ -22,10 +22,10 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use newchessbot::board::Position;
-use newchessbot::movegen::generate_legal;
-use newchessbot::rng::Rng;
-use newchessbot::search::{Evaluator, Search, SearchLimits};
+use nexus::board::Position;
+use nexus::movegen::generate_legal;
+use nexus::rng::Rng;
+use nexus::search::{Evaluator, Search, SearchLimits};
 
 /// Random plies played out of the start position.
 const OPENING_PLIES: usize = 8;

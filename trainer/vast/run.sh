@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Train the newchessbot NNUE on a rented vast.ai GPU, with guardrails so money
+# Train the nexus NNUE on a rented vast.ai GPU, with guardrails so money
 # is not wasted.
 #
 # From the bundle root, after uploading it:
@@ -296,7 +296,7 @@ train() {
     batches=$(( (positions + batch - 1) / batch ))
     stamp=$(mktemp)
     log "training $id on $positions positions: $epochs superbatches of $batches x $batch, wdl $wdl"
-    with_cap "$TRAINER/target/release/newchessbot-trainer" --data "$data" --out "$NETS" \
+    with_cap "$TRAINER/target/release/nexus-trainer" --data "$data" --out "$NETS" \
         --id "$id" --wdl "$wdl" --batch-size "$batch" --batches-per-superbatch "$batches" \
         --superbatches "$epochs" --lr-step $((epochs * 45 / 100 > 0 ? epochs * 45 / 100 : 1))
     net=$(newest_net_since "$stamp")
@@ -502,7 +502,7 @@ session() {
     # but reproduce the evaluation that labelled the data.
     local wdl finals=""
     for wdl in ${WDLS:-$default_wdls}; do
-        train "$TRAIN_DATA" "newchessbot-$mode-wdl$wdl" "$EPOCHS" 16384 "$wdl"
+        train "$TRAIN_DATA" "nexus-$mode-wdl$wdl" "$EPOCHS" 16384 "$wdl"
         netcheck_gate "$TRAINED_NET" "$TRAIN_TEXT"
         finals="$finals $TRAINED_NET"
     done

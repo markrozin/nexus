@@ -54,10 +54,10 @@ use std::sync::Arc;
 use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
 use ruzstd::decoding::StreamingDecoder;
 
-use newchessbot::board::Position;
-use newchessbot::eval::evaluate;
-use newchessbot::search::{is_insufficient_material, Evaluator, Search};
-use newchessbot::types::{Color, PieceType, Square};
+use nexus::board::Position;
+use nexus::eval::evaluate;
+use nexus::search::{is_insufficient_material, Evaluator, Search};
+use nexus::types::{Color, PieceType, Square};
 
 /// Shallower evaluations are too noisy to be worth a label.
 const MIN_DEPTH: i64 = 18;
@@ -551,7 +551,7 @@ fn main() -> ExitCode {
     };
     let mut out = BufWriter::with_capacity(1 << 20, out);
 
-    newchessbot::magic::init();
+    nexus::magic::init();
     // The quiet test in TSV mode compares against the handcrafted evaluation,
     // so quiescence must use it too.
     let mut search = Search::new(Arc::new(AtomicBool::new(false)));

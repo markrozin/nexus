@@ -8,9 +8,9 @@
 //! Build before redirecting: the shell truncates the target file first, and the
 //! crate needs it to compile.
 
-use newchessbot::magic::find_magic;
-use newchessbot::rng::Rng;
-use newchessbot::types::Square;
+use nexus::magic::find_magic;
+use nexus::rng::Rng;
+use nexus::types::Square;
 
 fn main() {
     // Fixed seed so a regeneration is reproducible.

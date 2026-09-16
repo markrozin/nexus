@@ -11,11 +11,11 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use newchessbot::board::Position;
-use newchessbot::movegen::generate_legal;
-use newchessbot::rng::Rng;
-use newchessbot::search::{Search, SearchLimits};
-use newchessbot::types::{Color, PieceType};
+use nexus::board::Position;
+use nexus::movegen::generate_legal;
+use nexus::rng::Rng;
+use nexus::search::{Search, SearchLimits};
+use nexus::types::{Color, PieceType};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum Outcome {
