@@ -1,5 +1,6 @@
 <title>Nexus Chess</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@400;600;800&family=Chivo+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+Symbols+2&text=%E2%99%94%E2%99%95%E2%99%96%E2%99%97%E2%99%98%E2%99%99%E2%99%9A%E2%99%9B%E2%99%9C%E2%99%9D%E2%99%9E%E2%99%9F&display=block">
 <style>
   :root {
     --bg: #ffffff;
@@ -12,8 +13,8 @@
     --signal: #1d4e89;
     --brass: #e8c66a;
     --white-piece: #ffffff;
-    --white-piece-edge: #1b2a3d;
-    --black-piece: #1b2a3d;
+    --piece-ink: #14181d;
+    --black-piece: #14181d;
     --shadow: 0 1px 2px rgba(18, 36, 58, .07), 0 8px 22px rgba(18, 36, 58, .07);
   }
 
@@ -31,7 +32,7 @@
     padding-block: 18px 24px;
   }
 
-  .wrap { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+  .wrap { max-width: 1240px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
 
   header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
   .wordmark {
@@ -39,15 +40,21 @@
     font-weight: 600; font-size: 1.45rem; letter-spacing: .22em; text-transform: uppercase;
     margin: 0;
   }
-  .tagline { color: var(--muted); font-size: .92rem; margin: 0; }
-  .tagline strong { color: var(--ink); font-weight: 600; }
 
-  .game { display: grid; grid-template-columns: minmax(0, 1fr) 290px; gap: 18px; align-items: start; }
+  .game {
+    display: grid; grid-template-columns: auto 280px; justify-content: center;
+    gap: 24px; align-items: start;
+  }
   @media (max-width: 820px) { .game { grid-template-columns: minmax(0, 1fr); } }
 
   .board-area {
+    /* The board takes whatever height the window has left after the title and
+       page padding, and never more than its column's width. */
     display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px;
-    width: min(100%, 62vh); margin-inline: auto;
+    width: clamp(260px, min(calc(100vh - 96px), calc(100vw - 364px)), 1000px);
+  }
+  @media (max-width: 820px) {
+    .board-area { width: min(100%, calc(100vh - 96px)); margin-inline: auto; }
   }
 
   .evalbar {
@@ -66,7 +73,7 @@
        sizes to its contents, so ranks holding pieces grow and empty ranks
        collapse. Eight equal rows in a square box give 64 equal squares. */
     display: grid; grid-template-columns: repeat(8, 1fr); grid-template-rows: repeat(8, 1fr);
-    aspect-ratio: 1;
+    aspect-ratio: 1; container-type: inline-size;
     border: 1px solid var(--line); border-radius: 6px; overflow: hidden; box-shadow: var(--shadow);
     touch-action: manipulation;
   }
@@ -74,13 +81,19 @@
     position: relative; display: flex; align-items: center; justify-content: center;
     border: 0; padding: 0; cursor: pointer; background: var(--light-square);
     min-width: 0; min-height: 0;
-    font-size: clamp(20px, 6.6vh, 42px); line-height: 1;
+    font-size: clamp(22px, 7vh, 64px); font-size: 9.6cqw; line-height: 1;
   }
   .sq.dark { background: var(--dark-square); }
   .sq:disabled { cursor: default; }
   .sq:focus-visible { outline: 2px solid var(--signal); outline-offset: -3px; }
-  .sq .piece { pointer-events: none; }
-  .sq .piece.w { color: var(--white-piece); -webkit-text-stroke: 1px var(--white-piece-edge); }
+  .sq .piece {
+    pointer-events: none; position: relative; isolation: isolate;
+    font-family: "Noto Sans Symbols 2", "Segoe UI Symbol", "DejaVu Sans", serif; font-weight: 400;
+  }
+  .sq .piece.w { color: var(--piece-ink); }
+  .sq .piece.w::before {
+    content: attr(data-fill); position: absolute; inset: 0; z-index: -1; color: var(--white-piece);
+  }
   .sq .piece.b { color: var(--black-piece); }
   .sq.last::after {
     content: ""; position: absolute; inset: 0; background: var(--brass); opacity: .26; pointer-events: none;
@@ -94,7 +107,7 @@
   }
   .sq .hint.capture { width: 82%; height: 82%; border-radius: 50%; background: none; box-shadow: inset 0 0 0 4px var(--signal); opacity: .55; }
   .sq .coord {
-    position: absolute; font-family: "Chivo Mono", ui-monospace, monospace; font-size: 9px;
+    position: absolute; font-family: "Chivo Mono", ui-monospace, monospace; font-size: max(9px, 1.5cqw);
     color: var(--ink); opacity: .45; pointer-events: none;
   }
   .sq .coord.file { right: 3px; bottom: 1px; }
@@ -143,10 +156,11 @@
   }
 
   .promo { display: flex; gap: 6px; align-items: center; }
-  .promo button { font-size: 1.5rem; line-height: 1; padding: 4px 8px; }
+  .promo button {
+    font-size: 1.5rem; line-height: 1; padding: 4px 8px;
+    font-family: "Noto Sans Symbols 2", "Segoe UI Symbol", serif;
+  }
 
-  footer { color: var(--muted); font-size: .8rem; border-top: 1px solid var(--line); padding-top: 14px; }
-  footer a { color: var(--signal); }
 
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
@@ -154,7 +168,6 @@
 <div class="wrap">
   <header>
     <h1 class="wordmark">Nexus</h1>
-    <p class="tagline">A chess engine written from scratch in Rust — <strong>bitboards, alpha-beta search, NNUE evaluation</strong> — compiled to WebAssembly and running in this tab.</p>
   </header>
 
   <div class="game">
@@ -169,7 +182,7 @@
     <div class="panel">
       <div class="status">
         <div class="turn" id="turn">Your move</div>
-        <div class="detail" id="detail">You are White. Click a piece, then its destination.</div>
+        <div class="detail" id="detail"></div>
       </div>
 
       <div class="readout">
@@ -229,18 +242,15 @@
     </div>
   </div>
 
-  <footer>
-    Nexus searches with alpha-beta, quiescence, a transposition table, null-move pruning and late move reductions, and
-    evaluates positions with a 768→128×2→1 network trained on 191.5 million positions from the
-    <a href="https://database.lichess.org/">Lichess evaluation database</a> (CC0). Strength here is set by node count,
-    because WebAssembly has no clock for the engine to time itself by.
-  </footer>
 </div>
 
 <script>
   const WASM_BASE64 = "__WASM_BASE64__";
 
-  const GLYPH = { k: "♚", q: "♛", r: "♜", b: "♝", n: "♞", p: "♟" };
+  // Outline glyphs draw White's pieces, solid glyphs Black's; the solid glyph
+  // also fills the inside of each White piece.
+  const OUTLINE = { k: "♔", q: "♕", r: "♖", b: "♗", n: "♘", p: "♙" };
+  const SOLID = { k: "♚", q: "♛", r: "♜", b: "♝", n: "♞", p: "♟" };
   const START = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
   const el = {
@@ -415,7 +425,12 @@
         if (piece) {
           const glyph = document.createElement("span");
           glyph.className = "piece " + piece.color;
-          glyph.textContent = GLYPH[piece.type];
+          if (piece.color === "w") {
+            glyph.textContent = OUTLINE[piece.type];
+            glyph.dataset.fill = SOLID[piece.type];
+          } else {
+            glyph.textContent = SOLID[piece.type];
+          }
           square.append(glyph);
         }
         if (state.targets.includes(name)) {
@@ -489,7 +504,7 @@
     state.thinking = false;
     state.playerColor = el.side.value;
     state.orientation = state.playerColor;
-    setStatus("Your move", state.playerColor === "w" ? "You are White. Click a piece, then its destination." : "You are Black. Nexus opens.");
+    setStatus("Your move", state.playerColor === "w" ? "" : "Nexus plays first.");
     render();
     if (sideToMove(state.fen) !== state.playerColor) engineTurn();
   }
