@@ -35,3 +35,6 @@
 # Match logs and PGNs, and the tallies fastchess leaves in its working directory
 /sprt
 /config.json
+
+# Browser build output (the wasm is rebuilt by web/build.sh)
+/web/target
