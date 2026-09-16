@@ -1,4 +1,4 @@
-# newchessbot — conventions
+# Nexus — conventions
 
 A chess engine in Rust: minimax with alpha-beta pruning, quiescence search, and
 an NNUE evaluation. This file is the source of truth for cross-cutting
@@ -207,7 +207,7 @@ better here. See `BAD_CAPTURE_BASE`.
 5 onward, intuition about our own changes stops being reliable: some heuristics
 gain 20 Elo and some lose 5, and reading the code does not tell you which.
 
-    fastchess -engine cmd=./target/release/newchessbot name=new \
+    fastchess -engine cmd=./target/release/nexus name=new \
               -engine cmd=./baseline name=base \
               -each tc=8+0.08 -rounds 50000 -concurrency 15 \
               -openings file=UHO_Lichess_4852_v1.epd format=epd order=random \
@@ -248,7 +248,7 @@ catching changes that are clearly *worse*; they do not rank the good ones.
 It needs **absolute** paths for `cmd=` and `file=`; relative ones fail with
 "process creation failed".
 
-The baseline to test against is `baseline/newchessbot-m5.exe` (gitignored;
+The baseline to test against is `baseline/nexus-m5.exe` (gitignored;
 rebuild from the commit named in `baseline/VERSION.txt`). Snapshot a new one
 whenever a change passes.
 

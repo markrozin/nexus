@@ -1,4 +1,4 @@
-# newchessbot
+# Nexus
 
 A chess engine written from scratch in Rust: bitboards with magic sliders,
 alpha-beta search with quiescence, and an NNUE evaluation.

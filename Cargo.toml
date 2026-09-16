@@ -5,7 +5,7 @@ resolver = "2"
 members = []
 
 [package]
-name = "newchessbot"
+name = "nexus"
 version = "0.1.0"
 edition = "2021"
 # `let ... else` in the UCI parser.
@@ -18,11 +18,11 @@ publish = false
 # The engine lives in the library (src/lib.rs) so tests and benches can reach
 # it; the binary is just the stdin loop.
 [lib]
-name = "newchessbot"
+name = "nexus"
 path = "src/lib.rs"
 
 [[bin]]
-name = "newchessbot"
+name = "nexus"
 path = "src/main.rs"
 
 # Empty criterion target. Add benchmark functions to benches/engine.rs.

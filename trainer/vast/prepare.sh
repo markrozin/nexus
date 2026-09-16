@@ -12,11 +12,11 @@
 # CUDA build and training itself -- and never a bad data file, a sign error, a
 # CRLF script, or a trainer or engine that does not build from its lockfile.
 #
-# Produces dist/newchessbot-train.tar.gz, laid out as run.sh expects:
+# Produces dist/nexus-train.tar.gz, laid out as run.sh expects:
 #
-#   newchessbot-train/trainer/   the trainer crate and the runbook
-#   newchessbot-train/engine/    the engine, so netcheck and lichesseval run on the box
-#   newchessbot-train/data/      smoke data, plus the training data in self-play mode
+#   nexus-train/trainer/   the trainer crate and the runbook
+#   nexus-train/engine/    the engine, so netcheck and lichesseval run on the box
+#   nexus-train/data/      smoke data, plus the training data in self-play mode
 #
 # --lichess bundles no training data: the 22 GB database is streamed on the
 # rental, since nothing that large can be uploaded through the browser. Its
@@ -40,7 +40,7 @@ SMOKE_DATA=data/tp8.shuffled.data
 SMOKE_TEXT=data/tp8.dedup.txt
 HF_SAMPLE=dist/hf_sample.tsv
 HF_PATHOLOGICAL=dist/hf_pathological.tsv
-BUNDLE=dist/newchessbot-train.tar.gz
+BUNDLE=dist/nexus-train.tar.gz
 CHECK_LINES=200000
 
 log() { printf '\n=== %s ===\n' "$*"; }
@@ -162,7 +162,7 @@ echo "scripts are LF and parse; trainer and engine tools build with --locked, as
 
 log "10. bundle"
 work=$(mktemp -d)
-b="$work/newchessbot-train"
+b="$work/nexus-train"
 mkdir -p "$b/trainer" "$b/engine" "$b/data" dist
 cp -r trainer/Cargo.toml trainer/Cargo.lock trainer/src trainer/vast "$b/trainer/"
 # networks/ too: the engine embeds networks/default.bin at compile time.
@@ -171,13 +171,13 @@ cp "$SMOKE_DATA" "$SMOKE_TEXT" "$b/data/"
 if [ "$MODE" = selfplay ]; then
     cp "$STEM.shuffled.data" "$STEM.check.txt" "$b/data/"
 fi
-tar -czf "$BUNDLE" -C "$work" newchessbot-train
+tar -czf "$BUNDLE" -C "$work" nexus-train
 rm -rf "$work"
 
 # Re-extract and check what will actually be uploaded, not what was intended.
 check=$(mktemp -d)
 tar -xzf "$BUNDLE" -C "$check"
-r="$check/newchessbot-train"
+r="$check/nexus-train"
 need="trainer/Cargo.toml trainer/Cargo.lock trainer/src/main.rs trainer/vast/run.sh trainer/vast/parquet2tsv.py
       engine/Cargo.toml engine/Cargo.lock engine/src/nnue.rs engine/src/bin/netcheck.rs
       engine/src/bin/lichesseval.rs engine/networks/default.bin engine/benches/engine.rs

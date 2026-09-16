@@ -1,4 +1,4 @@
-//! Train the newchessbot NNUE with bullet.
+//! Train the nexus NNUE with bullet.
 //!
 //! Training needs a GPU. bullet compiles with no backend enabled, but that
 //! build runs on a mock runtime that panics at the first gradient, so a local
@@ -40,9 +40,9 @@ use bullet_lib::{
     value::{loader, ValueTrainerBuilder},
 };
 
-/// Must equal `newchessbot::nnue::HIDDEN`.
+/// Must equal `nexus::nnue::HIDDEN`.
 const HIDDEN_SIZE: usize = 128;
-/// Must equal `newchessbot::nnue::{SCALE, QA, QB}`.
+/// Must equal `nexus::nnue::{SCALE, QA, QB}`.
 const SCALE: i32 = 400;
 const QA: i16 = 255;
 const QB: i16 = 64;
@@ -89,7 +89,7 @@ fn parse_args() -> Args {
     Args {
         data,
         out: get("--out").unwrap_or_else(|| "nets".to_string()),
-        net_id: get("--id").unwrap_or_else(|| "newchessbot".to_string()),
+        net_id: get("--id").unwrap_or_else(|| "nexus".to_string()),
         superbatches,
         // bullet's default: ~100M positions per superbatch at batch 16384.
         batches_per_superbatch: num("--batches-per-superbatch", 6104).max(1),

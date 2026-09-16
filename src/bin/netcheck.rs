@@ -29,10 +29,10 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::ExitCode;
 
-use newchessbot::board::Position;
-use newchessbot::eval::evaluate;
-use newchessbot::nnue::{self, Network};
-use newchessbot::types::{Color, Piece, Square};
+use nexus::board::Position;
+use nexus::eval::evaluate;
+use nexus::nnue::{self, Network};
+use nexus::types::{Color, Piece, Square};
 
 /// Below this on either side, the net is not merely weak but wrong.
 const MIN_CORRELATION: f64 = 0.2;

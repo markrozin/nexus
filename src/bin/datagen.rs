@@ -47,12 +47,12 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use newchessbot::board::Position;
-use newchessbot::eval::evaluate;
-use newchessbot::movegen::generate_legal;
-use newchessbot::rng::Rng;
-use newchessbot::search::{Evaluator, Search, SearchLimits, MATE_IN_MAX_PLY};
-use newchessbot::types::Color;
+use nexus::board::Position;
+use nexus::eval::evaluate;
+use nexus::movegen::generate_legal;
+use nexus::rng::Rng;
+use nexus::search::{Evaluator, Search, SearchLimits, MATE_IN_MAX_PLY};
+use nexus::types::Color;
 
 /// Fixed node budget per move.
 ///
@@ -131,7 +131,7 @@ fn main() -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    newchessbot::magic::init();
+    nexus::magic::init();
 
     let writer = Arc::new(Mutex::new(BufWriter::new(File::create(&config.out)?)));
     let games_done = Arc::new(AtomicU64::new(0));
@@ -253,7 +253,7 @@ impl Worker {
             // positions: they score a flat draw, sail through the quiet filter,
             // and teach the network nothing. bullet's validator flagged 112 of
             // them in a 16K-position sample before this check existed.
-            if newchessbot::search::is_insufficient_material(&pos) {
+            if nexus::search::is_insufficient_material(&pos) {
                 result = 0.5;
                 break;
             }

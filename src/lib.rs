@@ -1,4 +1,4 @@
-//! newchessbot — a chess engine.
+//! nexus — a chess engine.
 //!
 //! Layered bottom-up:
 //!

@@ -24,7 +24,7 @@ use crate::search::{score_to_uci, Evaluator, IterationInfo, Search, SearchLimits
 use crate::tt::TranspositionTable;
 use crate::types::Color;
 
-pub const ENGINE_NAME: &str = "newchessbot";
+pub const ENGINE_NAME: &str = "Nexus";
 pub const ENGINE_AUTHOR: &str = "Mark Rozin";
 
 // ---------------------------------------------------------------------------

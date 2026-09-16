@@ -34,7 +34,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 V="${VASTAI:-/c/Users/Mark/AppData/Roaming/Python/Python314/Scripts/vastai.exe}"
 PY="${PYTHON:-python}"
 MODE="${1:-lichess}"
-BUNDLE="$ROOT/dist/newchessbot-train.tar.gz"
+BUNDLE="$ROOT/dist/nexus-train.tar.gz"
 STATE="$ROOT/dist/vast-session"
 NETS_OUT="$ROOT/nets/$MODE-$(date +%Y%m%d-%H%M)"
 
@@ -50,7 +50,7 @@ POLL_SECONDS=120
 # looked up at run time.
 TEMPLATE_QUERY='name="NVIDIA CUDA" creator_id=62897'
 DISK_GB=100
-LABEL="newchessbot-$MODE"
+LABEL="nexus-$MODE"
 # China is excluded: Hugging Face is unreliable from there, and the session
 # downloads its data from Hugging Face.
 QUERY="gpu_name=RTX_4090 num_gpus=1 verified=true rentable=true reliability>0.98 inet_down>=500 cuda_vers>=12.8 disk_space>=$DISK_GB cpu_cores_effective>=12 direct_port_count>=1 geolocation notin [CN]"
@@ -226,13 +226,13 @@ log "ssh reachable at $SSH_HOST:$SSH_PORT"
 log "uploading the bundle"
 scp -P "$SSH_PORT" -i "$HOME/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new \
     -o UserKnownHostsFile="$STATE/known_hosts" -o BatchMode=yes \
-    "$BUNDLE" "$SSH_USER@$SSH_HOST:/workspace/newchessbot-train.tar.gz" || die "upload failed"
+    "$BUNDLE" "$SSH_USER@$SSH_HOST:/workspace/nexus-train.tar.gz" || die "upload failed"
 local_sum=$(sha256sum "$BUNDLE" | cut -d' ' -f1)
-remote_sum=$(ssh_run "sha256sum /workspace/newchessbot-train.tar.gz" | cut -d' ' -f1)
+remote_sum=$(ssh_run "sha256sum /workspace/nexus-train.tar.gz" | cut -d' ' -f1)
 [ "$local_sum" = "$remote_sum" ] || die "bundle checksum mismatch after upload"
 log "bundle verified on the instance"
 
-ssh_run "cd /workspace && tar -xzf newchessbot-train.tar.gz && test -f newchessbot-train/trainer/vast/run.sh" \
+ssh_run "cd /workspace && tar -xzf nexus-train.tar.gz && test -f nexus-train/trainer/vast/run.sh" \
     || die "could not unpack the bundle on the instance"
 
 # Session 4 lost 50 minutes here: `a && b && nohup c &` backgrounds the whole
@@ -244,7 +244,7 @@ cat > "$STATE/launch.sh" <<'EOF'
 # Started detached by rent.sh. The container's environment is not guaranteed
 # in an ssh session, so run.sh's self-destroy credentials come from PID 1.
 export $(tr '\0' '\n' < /proc/1/environ | grep -E '^(CONTAINER_ID|CONTAINER_API_KEY)=' | xargs)
-cd /workspace/newchessbot-train || exit 1
+cd /workspace/nexus-train || exit 1
 export PRICE_PER_HOUR=__PRICE__ MAX_DOLLARS=__MAX_DOLLARS__
 exec bash trainer/vast/run.sh __MODE__
 EOF
@@ -252,19 +252,19 @@ sed -i "s/__PRICE__/$PRICE/; s/__MAX_DOLLARS__/$MAX_DOLLARS/; s/__MODE__/$MODE/"
 timeout 60 ssh "${SSH_OPTS[@]}" "cat > /workspace/launch.sh" < "$STATE/launch.sh" \
     || die "could not upload the launcher"
 timeout 60 ssh -n "${SSH_OPTS[@]}" \
-    "setsid nohup bash /workspace/launch.sh > /workspace/newchessbot-train/run.log 2>&1 < /dev/null & echo launched" \
+    "setsid nohup bash /workspace/launch.sh > /workspace/nexus-train/run.log 2>&1 < /dev/null & echo launched" \
     || die "could not launch run.sh"
 
 started=0
 for _ in $(seq 1 12); do
     sleep 10
-    if ssh_run "grep -q '=== checking GPU' /workspace/newchessbot-train/run.log" 2>/dev/null; then
+    if ssh_run "grep -q '=== checking GPU' /workspace/nexus-train/run.log" 2>/dev/null; then
         started=1
         break
     fi
 done
 [ "$started" = 1 ] \
-    || die "run.sh did not start: $(ssh_run 'tail -5 /workspace/newchessbot-train/run.log' 2>&1)"
+    || die "run.sh did not start: $(ssh_run 'tail -5 /workspace/nexus-train/run.log' 2>&1)"
 log "run.sh $MODE started"
 
 # ---------------------------------------------------------------------------
@@ -279,7 +279,7 @@ while :; do
     past_deadline && die "local wall-clock deadline reached"
     # Into a temp file first: a failed poll must not truncate the last good copy,
     # which is the only diagnostic left once the instance is gone.
-    if ssh_run "cat /workspace/newchessbot-train/run.log" > "$STATE/run.log.tmp" 2> "$STATE/ssh.err" \
+    if ssh_run "cat /workspace/nexus-train/run.log" > "$STATE/run.log.tmp" 2> "$STATE/ssh.err" \
         && mv "$STATE/run.log.tmp" "$STATE/run.log"; then
         unreachable=0
         size_now=$(stat -c %s "$STATE/run.log")
