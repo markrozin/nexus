@@ -39,6 +39,10 @@ datagen = ["dep:ruzstd"]
 magicgen = []
 # Opening-book generation for match testing. Not part of any engine build.
 bookgen = []
+# Network width other than the default 128, for testing wider candidate nets.
+# See `nnue::HIDDEN`.
+hidden256 = []
+hidden512 = []
 
 [dependencies]
 # Stack-allocated move lists in the hot path; no heap allocation inside search.

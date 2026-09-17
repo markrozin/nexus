@@ -44,24 +44,33 @@ use crate::board::Position;
 use crate::types::{Color, Piece, Square};
 
 /// The network compiled into the binary, so the engine plays at full strength
-/// with no files beside it. Replace `networks/default.bin` to ship a new net;
-/// the loader's size check fails the build-time test if its shape is wrong.
+/// with no files beside it. Replace `networks/default.bin` to ship a new net.
 static EMBEDDED_BYTES: &[u8] = include_bytes!("../networks/default.bin");
 
-static EMBEDDED: LazyLock<Network> = LazyLock::new(|| {
-    Network::from_bytes(EMBEDDED_BYTES).expect("networks/default.bin matches HIDDEN")
-});
+static EMBEDDED: LazyLock<Option<Network>> =
+    LazyLock::new(|| Network::from_bytes(EMBEDDED_BYTES).ok());
 
-/// The embedded network, parsed once on first use.
-pub fn embedded() -> &'static Network {
-    &EMBEDDED
+/// The embedded network, parsed once on first use -- or `None` when this build's
+/// [`HIDDEN`] differs from the width of `networks/default.bin`. A `hidden512`
+/// build testing a candidate net loads that net through `EvalFile` instead,
+/// and must not fail just because the shipped net is narrower.
+pub fn embedded() -> Option<&'static Network> {
+    EMBEDDED.as_ref()
 }
 
 pub const INPUTS: usize = 768;
 
-/// Accumulator width. Must match the trainer's `HIDDEN_SIZE`; the loader
-/// rejects a file of any other size rather than reading garbage.
+/// Accumulator width. Must match the trainer's `--hidden`; the loader rejects a
+/// file of any other size rather than reading garbage.
+///
+/// Fixed at build time, since the accumulator is a stack array sized by it:
+/// 128 by default, or 256 / 512 with the `hidden256` / `hidden512` features.
+#[cfg(not(any(feature = "hidden256", feature = "hidden512")))]
 pub const HIDDEN: usize = 128;
+#[cfg(all(feature = "hidden256", not(feature = "hidden512")))]
+pub const HIDDEN: usize = 256;
+#[cfg(feature = "hidden512")]
+pub const HIDDEN: usize = 512;
 
 pub const QA: i32 = 255;
 pub const QB: i32 = 64;
@@ -253,6 +262,14 @@ impl std::fmt::Debug for Accumulator {
 }
 
 impl Accumulator {
+    /// All zeros. A placeholder only: a search refreshes its root accumulator
+    /// before evaluating anything.
+    pub const fn zeroed() -> Self {
+        Self {
+            values: [[0; HIDDEN]; Color::COUNT],
+        }
+    }
+
     /// Build from scratch: start at the bias, add one column per piece.
     pub fn refresh(pos: &Position, net: &Network) -> Self {
         let mut acc = Self {
@@ -538,10 +555,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        any(feature = "hidden256", feature = "hidden512"),
+        ignore = "networks/default.bin is 128 wide"
+    )]
     fn the_embedded_network_loads_and_behaves_like_a_chess_evaluation() {
         // A trained net, not a synthetic one: the start position is level, and
         // being a queen up is clearly good for the side that has it.
-        let net = embedded();
+        let net = embedded().expect("networks/default.bin matches the default HIDDEN");
         let start = net.evaluate_position(&Position::startpos());
         assert!(start.abs() < 100, "start position scored {start}");
 

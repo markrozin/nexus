@@ -193,6 +193,16 @@ pub enum Evaluator {
     Nnue(&'static Network),
 }
 
+impl Default for Evaluator {
+    /// The embedded network. It passed its SPRT against the handcrafted
+    /// evaluation 34-0 (and led 141-12-3 before that); see CLAUDE.md. A build
+    /// whose width does not match `networks/default.bin` has no embedded net
+    /// and falls back to the handcrafted evaluation.
+    fn default() -> Self {
+        nnue::embedded().map_or(Evaluator::Handcrafted, Evaluator::Nnue)
+    }
+}
+
 pub struct Search {
     pv: PvTable,
     nodes: u64,
@@ -259,11 +269,9 @@ impl Search {
             null_move_allowed: true,
             first_iteration_done: false,
             aborted: false,
-            // Handcrafted until a network passes an SPRT against it. The first
-            // one lost by 386 Elo; see the results table in CLAUDE.md.
-            evaluator: Evaluator::Handcrafted,
+            evaluator: Evaluator::default(),
             accumulators: vec![
-                Accumulator::refresh(&Position::startpos(), nnue::embedded());
+                Accumulator::zeroed();
                 MAX_PLY
             ]
             .into_boxed_slice(),
@@ -1014,9 +1022,18 @@ pub fn score_to_uci(score: i32) -> String {
 mod tests {
     use super::*;
 
+    /// The shipped network. Tests that need one run only in the default
+    /// 128-wide build, which is the width `networks/default.bin` has.
+    fn test_net() -> &'static Network {
+        nnue::embedded().expect("networks/default.bin matches the default HIDDEN")
+    }
+
     fn search_to_depth(fen: &str, depth: u32) -> SearchResult {
         let pos: Position = fen.parse().expect("test fen is valid");
         let mut search = Search::new(Arc::new(AtomicBool::new(false)));
+        // These tests check search logic against centipawn thresholds written
+        // for the handcrafted scale, so pin it rather than follow the default.
+        search.set_evaluator(Evaluator::Handcrafted);
         search.run(
             &pos,
             SearchLimits {
@@ -1144,6 +1161,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        any(feature = "hidden256", feature = "hidden512"),
+        ignore = "networks/default.bin is 128 wide"
+    )]
     fn alpha_beta_agrees_with_plain_minimax() {
         // The whole point of alpha-beta is that it is exact. Depth 2 only:
         // the reference prunes nothing, so its cost is the raw branching
@@ -1156,7 +1177,7 @@ mod tests {
             "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
         ] {
             let pos: Position = fen.parse().unwrap();
-            for evaluator in [Evaluator::Handcrafted, Evaluator::Nnue(nnue::embedded())] {
+            for evaluator in [Evaluator::Handcrafted, Evaluator::Nnue(test_net())] {
                 let mut search = Search::new(Arc::new(AtomicBool::new(false)));
                 search.set_evaluator(evaluator);
                 search.refresh_root(&pos);
@@ -1168,6 +1189,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        any(feature = "hidden256", feature = "hidden512"),
+        ignore = "networks/default.bin is 128 wide"
+    )]
     fn accumulators_stay_in_sync_through_a_real_search() {
         // Every network evaluation inside a real search -- with null moves,
         // reductions, re-searches and quiescence all unwinding in different
@@ -1181,7 +1206,7 @@ mod tests {
         ] {
             let pos: Position = fen.parse().unwrap();
             let mut search = Search::new(Arc::new(AtomicBool::new(false)));
-            search.set_evaluator(Evaluator::Nnue(nnue::embedded()));
+            search.set_evaluator(Evaluator::Nnue(test_net()));
             search.verify_accumulators = true;
             let result = search.run(
                 &pos,
@@ -1407,6 +1432,7 @@ mod tests {
         // must score it a draw rather than believing it is winning.
         let pos: Position = "7k/8/8/8/8/8/8/K6R w - - 0 1".parse().unwrap();
         let mut search = Search::new(Arc::new(AtomicBool::new(false)));
+        search.set_evaluator(Evaluator::Handcrafted);
         let result = search.run(
             &pos,
             SearchLimits {

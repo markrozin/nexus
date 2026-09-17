@@ -40,8 +40,6 @@ use bullet_lib::{
     value::{loader, ValueTrainerBuilder},
 };
 
-/// Must equal `nexus::nnue::HIDDEN`.
-const HIDDEN_SIZE: usize = 128;
 /// Must equal `nexus::nnue::{SCALE, QA, QB}`.
 const SCALE: i32 = 400;
 const QA: i16 = 255;
@@ -56,6 +54,7 @@ struct Args {
     batch_size: usize,
     threads: usize,
     wdl: f32,
+    hidden: usize,
     lr: f32,
     lr_step: usize,
     save_rate: usize,
@@ -80,7 +79,7 @@ fn parse_args() -> Args {
         eprintln!(
             "usage: trainer --data <file.data> [--out nets] [--id name] \
              [--superbatches 40] [--batches-per-superbatch 6104] [--batch-size 16384] \
-             [--threads 4] [--wdl 0.4] [--lr 0.001] [--lr-step N] [--save-rate N]"
+             [--threads 4] [--wdl 0.4] [--hidden 128] [--lr 0.001] [--lr-step N] [--save-rate N]"
         );
         std::process::exit(2);
     };
@@ -103,6 +102,9 @@ fn parse_args() -> Args {
         // so this leans on the search score instead. A starting choice, not a
         // tuned one.
         wdl: float("--wdl", 0.4),
+        // Accumulator width. Must equal `nexus::nnue::HIDDEN` in the engine
+        // build that loads the net: 128, or 256 / 512 with its matching feature.
+        hidden: num("--hidden", 128),
         lr: float("--lr", 0.001),
         // Cut the learning rate 10x every this many superbatches. bullet StepLR
         // reads `step` as a period, not a position: its example uses 18 of 40,
@@ -118,7 +120,7 @@ fn main() {
     let args = parse_args();
     println!(
         "training {}x2 net on {}: {} superbatches of {} batches x {}, wdl {}, lr {} cut 10x every {} superbatches",
-        HIDDEN_SIZE,
+        args.hidden,
         args.data,
         args.superbatches,
         args.batches_per_superbatch,
@@ -128,6 +130,7 @@ fn main() {
         args.lr_step
     );
 
+    let hidden = args.hidden;
     let mut trainer = ValueTrainerBuilder::default()
         .dual_perspective()
         .optimiser(AdamW)
@@ -139,9 +142,9 @@ fn main() {
             SavedFormat::id("l1b").round().quantise::<i16>(QA * QB),
         ])
         .loss_fn(|output, target| output.sigmoid().squared_error(target))
-        .build(|builder, stm_inputs, ntm_inputs| {
-            let l0 = builder.new_affine("l0", 768, HIDDEN_SIZE);
-            let l1 = builder.new_affine("l1", 2 * HIDDEN_SIZE, 1);
+        .build(move |builder, stm_inputs, ntm_inputs| {
+            let l0 = builder.new_affine("l0", 768, hidden);
+            let l1 = builder.new_affine("l1", 2 * hidden, 1);
 
             // Side to move first: that ordering is what tells the network whose
             // turn it is, and the engine concatenates in the same order.

@@ -256,8 +256,33 @@ need_rust() {
 build() {
     log "building the trainer with CUDA (Cargo.lock pins every bullet dependency)"
     (cd "$TRAINER" && with_cap cargo build --release --locked --features cuda)
-    log "building netcheck (the engine, to check the network on this box)"
-    (cd "$ENGINE" && with_cap cargo build --release --locked --features datagen --bin netcheck)
+    # One netcheck per network width: the engine's HIDDEN is a build feature.
+    local h features
+    for h in $(widths); do
+        features=datagen
+        [ "$h" = 128 ] || features="datagen,hidden$h"
+        log "building netcheck for width $h (the engine, to check the network on this box)"
+        (cd "$ENGINE" && with_cap cargo build --release --locked --features "$features" \
+            --bin netcheck --target-dir "target-h$h")
+    done
+}
+
+# Accumulator widths to train. 128 is always built too: the smoke train uses it.
+widths() {
+    echo 128 ${HIDDENS:-128} | tr ' ' '
+' | awk 'NF && !seen[$0]++'
+}
+
+# Fail fast, before anything is built: an unsupported width would otherwise
+# surface only after the data is downloaded and the first net trained.
+need_widths() {
+    local h
+    for h in ${HIDDENS:-128}; do
+        case "$h" in
+            128|256|512) ;;
+            *) echo "unsupported width '$h' in HIDDENS (128, 256 or 512)" >&2; exit 1 ;;
+        esac
+    done
 }
 
 newest_net_since() {
@@ -265,20 +290,24 @@ newest_net_since() {
         | sort -n | tail -1 | cut -d' ' -f2-
 }
 
-# HIDDEN = 128: 98,689 i16 values = 197,378 bytes, padded to a multiple of 64.
+# 771 * H + 1 i16 values, padded to a multiple of 64 bytes.
+# H = 128: 98,689 values = 197,378 bytes, 197,440 padded.
 check_size() {
-    local size
-    size=$(stat -c %s "$1")
-    echo "$1 ($size bytes)"
-    if [ "$size" != 197378 ] && [ "$size" != 197440 ]; then
-        echo "UNEXPECTED SIZE: the engine loader will reject this. Check HIDDEN_SIZE." >&2
+    local net="$1" h="$2" size exact padded
+    size=$(stat -c %s "$net")
+    exact=$(( 2 * (771 * h + 1) ))
+    padded=$(( (exact + 63) / 64 * 64 ))
+    echo "$net ($size bytes, width $h)"
+    if [ "$size" != "$exact" ] && [ "$size" != "$padded" ]; then
+        echo "UNEXPECTED SIZE: a width-$h net is $exact or $padded bytes. Check --hidden." >&2
         exit 1
     fi
 }
 
 netcheck_gate() {
-    log "netcheck: $(basename "$1") against $(basename "$2")"
-    if ! "$ENGINE/target/release/netcheck" "$1" "$2" 200000; then
+    local h="${3:-128}"
+    log "netcheck: $(basename "$1") against $(basename "$2"), width $h"
+    if ! "$ENGINE/target-h$h/release/netcheck" "$1" "$2" 200000; then
         echo "netcheck FAILED -- the network does not track its data." >&2
         echo "Stopping here rather than spend more on a pipeline that is wrong." >&2
         exit 4
@@ -286,7 +315,7 @@ netcheck_gate() {
 }
 
 train() {
-    local data="$1" id="$2" epochs="$3" batch="$4" wdl="${5:-0.4}"
+    local data="$1" id="$2" epochs="$3" batch="$4" wdl="${5:-0.4}" h="${6:-128}"
     local bytes positions batches stamp net
     bytes=$(stat -c %s "$data")
     [ $((bytes % 32)) -eq 0 ] || { echo "$data is not whole 32-byte records" >&2; exit 1; }
@@ -295,13 +324,13 @@ train() {
     # positions per superbatch would loop a smaller file dozens of times each.
     batches=$(( (positions + batch - 1) / batch ))
     stamp=$(mktemp)
-    log "training $id on $positions positions: $epochs superbatches of $batches x $batch, wdl $wdl"
+    log "training $id on $positions positions: $epochs superbatches of $batches x $batch, wdl $wdl, width $h"
     with_cap "$TRAINER/target/release/nexus-trainer" --data "$data" --out "$NETS" \
-        --id "$id" --wdl "$wdl" --batch-size "$batch" --batches-per-superbatch "$batches" \
+        --id "$id" --wdl "$wdl" --hidden "$h" --batch-size "$batch" --batches-per-superbatch "$batches" \
         --superbatches "$epochs" --lr-step $((epochs * 45 / 100 > 0 ? epochs * 45 / 100 : 1))
     net=$(newest_net_since "$stamp")
     [ -n "$net" ] || { echo "training finished but wrote no .bin network" >&2; exit 1; }
-    check_size "$net"
+    check_size "$net" "$h"
     TRAINED_NET="$net"
 }
 
@@ -479,6 +508,7 @@ session() {
     arm_cleanup
     arm_hard_deadline
 
+    need_widths
     need_rust
     build
 
@@ -500,11 +530,14 @@ session() {
     # sweep costs almost nothing beyond the setup already paid for. On
     # self-play data WDL 0.0 (search score only) is the control: it should all
     # but reproduce the evaluation that labelled the data.
-    local wdl finals=""
-    for wdl in ${WDLS:-$default_wdls}; do
-        train "$TRAIN_DATA" "nexus-$mode-wdl$wdl" "$EPOCHS" 16384 "$wdl"
-        netcheck_gate "$TRAINED_NET" "$TRAIN_TEXT"
-        finals="$finals $TRAINED_NET"
+    # And one per width in HIDDENS, so a single rental can compare sizes.
+    local wdl h finals=""
+    for h in ${HIDDENS:-128}; do
+        for wdl in ${WDLS:-$default_wdls}; do
+            train "$TRAIN_DATA" "nexus-$mode-h$h-wdl$wdl" "$EPOCHS" 16384 "$wdl" "$h"
+            netcheck_gate "$TRAINED_NET" "$TRAIN_TEXT" "$h"
+            finals="$finals $TRAINED_NET"
+        done
     done
 
     log "done"

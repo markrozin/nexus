@@ -158,6 +158,10 @@ done
 (cd trainer && cargo build --release --locked 2>&1 | tail -1) || fail "trainer does not build against its lockfile"
 cargo build --release --locked --features datagen --bin netcheck --bin lichesseval 2>&1 | tail -1 \
     || fail "engine tools do not build against the lockfile"
+for h in 256 512; do
+    cargo check --release --locked --features "datagen,hidden$h" --bin netcheck --target-dir "target-h$h" 2>&1 | tail -1
+    [ "${PIPESTATUS[0]}" = 0 ] || fail "netcheck does not build at width $h"
+done
 echo "scripts are LF and parse; trainer and engine tools build with --locked, as the rental will"
 
 log "10. bundle"

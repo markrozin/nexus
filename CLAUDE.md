@@ -26,14 +26,21 @@ The engine is a library (`src/lib.rs`); the binary is only the stdin loop.
 
 `go` runs alpha-beta with quiescence, a transposition table, PVS, null move
 pruning, late move reductions and reverse futility pruning, to a time or depth
-limit, evaluating leaves with the handcrafted evaluation by default.
+limit, evaluating leaves with the NNUE compiled in from `networks/default.bin`.
 
-NNUE inference is wired in but opt-in until a network passes an SPRT against
-the handcrafted evaluation: `setoption name EvalFile value <embedded>` uses the
-net compiled in from `networks/default.bin`, a path loads any other net without
-rebuilding (which is how candidate nets get tested), and `<handcrafted>` is the
-default. Flip the default in `Search::with_table` and `Uci::new` only on a
-passing SPRT.
+The network became the default on 2026-09-17 after its SPRT (see the results
+table): `Evaluator::default()` picks the embedded net. `setoption name EvalFile
+value <handcrafted>` switches back, and a path loads any other net without
+rebuilding, which is how candidate nets get tested. Replace
+`networks/default.bin` only with a net that passed an SPRT against the current
+one.
+
+Widths other than 128 are build features (`hidden256`, `hidden512`) because
+the accumulator is a fixed-size array. Those builds have no embedded net (the
+shipped one is 128 wide), default to the handcrafted evaluation, and exist to
+load wider candidates through `EvalFile`; tests that need the embedded net are
+ignored in them. Build them into their own target dir, e.g.
+`cargo build --release --features hidden512 --target-dir target-h512`.
 
 The handcrafted `eval` stays. Datagen and bookgen pin it explicitly
 (`Evaluator::Handcrafted`): datagen's quiet filter and `datacheck` compare
@@ -248,7 +255,7 @@ catching changes that are clearly *worse*; they do not rank the good ones.
 It needs **absolute** paths for `cmd=` and `file=`; relative ones fail with
 "process creation failed".
 
-The baseline to test against is `baseline/nexus-m5.exe` (gitignored;
+The baseline to test against is `baseline/nexus-nnue128.exe` (gitignored;
 rebuild from the commit named in `baseline/VERSION.txt`). Snapshot a new one
 whenever a change passes.
 
@@ -295,6 +302,8 @@ W/L/D and pentanomial tallies if you lose the console output anyway.
 | Late move pruning, counter bug fixed | **H0 accepted** | 998 | -58.7 +/- 18.1 |
 | First NNUE (128x2, 915K HCE-labelled positions) vs m10c | **H0 accepted** | 322 | -385.9 +/- 61.9 |
 | Same net at fixed 20K nodes/move (removes the nps gap) | 13-83-4 | 100 | about -300 |
+| Lichess net (128x2, 191.5M Stockfish-scored positions, WDL 0) vs m10c, [0,5] | stopped early, 141-12-3 | 156 | far above +300 |
+| Same, [0,50] | **H1 accepted**, 34-0 | 34 | not measurable; made default |
 
 The first network is not a bug: accumulators match a refresh through real
 searches, material values are sane, and it tracks held-out labels (r 0.915) as
@@ -570,6 +579,7 @@ and uploads through the contents API.
 - `magicgen` — the offline magic-constant search. Run once; the output is
   committed as `src/magic_constants.rs`.
 - `bookgen` — opening-book generation for SPRT testing.
+- `hidden256`, `hidden512` — NNUE accumulator width for testing wider nets.
 
 ## Dependencies
 

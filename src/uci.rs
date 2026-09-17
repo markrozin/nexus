@@ -227,8 +227,9 @@ pub struct Uci<W: Sink> {
 }
 
 /// `EvalFile` values that name an evaluator rather than a file: the
-/// handcrafted evaluation (the default, until a network passes an SPRT), and
-/// the network compiled into the binary.
+/// handcrafted evaluation, and the network compiled into the binary (the
+/// default, since it passed its SPRT).
+/// An empty value restores whichever of the two [`Evaluator::default`] picks.
 const HANDCRAFTED_EVAL_FILE: &str = "<handcrafted>";
 const EMBEDDED_EVAL_FILE: &str = "<embedded>";
 
@@ -249,7 +250,7 @@ impl<W: Sink> Uci<W> {
             stop: Arc::new(AtomicBool::new(false)),
             worker: None,
             options: Options::default(),
-            evaluator: Evaluator::Handcrafted,
+            evaluator: Evaluator::default(),
         }
     }
 
@@ -341,9 +342,11 @@ impl<W: Sink> Uci<W> {
             Options::THREADS_MIN,
             Options::THREADS_MAX
         ))?;
-        self.send(&format!(
-            "option name EvalFile type string default {HANDCRAFTED_EVAL_FILE}"
-        ))?;
+        let default = match Evaluator::default() {
+            Evaluator::Nnue(_) => EMBEDDED_EVAL_FILE,
+            Evaluator::Handcrafted => HANDCRAFTED_EVAL_FILE,
+        };
+        self.send(&format!("option name EvalFile type string default {default}"))?;
         self.send("uciok")
     }
 
@@ -375,10 +378,19 @@ impl<W: Sink> Uci<W> {
                 Err(_) => return self.send(&format!("info string bad Threads value {value:?}")),
             },
             "evalfile" => {
-                if value.is_empty() || value == HANDCRAFTED_EVAL_FILE {
+                if value.is_empty() {
+                    self.evaluator = Evaluator::default();
+                } else if value == HANDCRAFTED_EVAL_FILE {
                     self.evaluator = Evaluator::Handcrafted;
                 } else if value == EMBEDDED_EVAL_FILE {
-                    self.evaluator = Evaluator::Nnue(nnue::embedded());
+                    match nnue::embedded() {
+                        Some(net) => self.evaluator = Evaluator::Nnue(net),
+                        None => {
+                            return self.send(
+                                "info string the embedded network does not match this build's width",
+                            )
+                        }
+                    }
                 } else {
                     match Network::load(std::path::Path::new(&value)) {
                         // Leaked on purpose: the search holds `&'static`, and a
@@ -561,7 +573,12 @@ mod tests {
                 format!("id author {ENGINE_AUTHOR}"),
                 "option name Hash type spin default 16 min 1 max 1024".to_string(),
                 "option name Threads type spin default 1 min 1 max 1024".to_string(),
-                "option name EvalFile type string default <handcrafted>".to_string(),
+                // Wider test builds have no embedded net to default to.
+                if cfg!(any(feature = "hidden256", feature = "hidden512")) {
+                    "option name EvalFile type string default <handcrafted>".to_string()
+                } else {
+                    "option name EvalFile type string default <embedded>".to_string()
+                },
                 "uciok".to_string(),
                 "readyok".to_string(),
             ]

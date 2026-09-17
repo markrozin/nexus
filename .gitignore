@@ -1,5 +1,6 @@
 # Rust / Cargo build output
 /target
+/target-h*
 **/*.rs.bk
 
 # MSVC debug info
