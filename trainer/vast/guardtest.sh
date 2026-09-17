@@ -51,6 +51,19 @@ expect "with_cap propagates a failing command" 1 $?
 ( source "$RUN"; CAP_SECONDS=99999; with_cap true ) >/dev/null 2>&1
 expect "with_cap passes a succeeding command" 0 $?
 
+# Network widths: sizes a wrong --hidden would produce are refused.
+for spec in "128 197440 0" "256 394754 0" "256 394816 0" "512 789568 0" "512 789506 0" "512 789500 1" "512 394816 1" "256 197440 1"; do
+    set -- $spec
+    head -c "$2" /dev/zero > "$T/net.bin"
+    ( source "$RUN"; check_size "$T/net.bin" "$1" ) >/dev/null 2>&1
+    expect "check_size width $1, $2 bytes" "$3" $?
+done
+( source "$RUN"; HIDDENS="256 768"; need_widths ) >/dev/null 2>&1
+expect "refuses an unsupported width before building" 1 $?
+out=$( source "$RUN"; HIDDENS="512 256 512"; widths | tr '
+' ' ' )
+[ "$out" = "128 512 256 " ] && ok "widths builds 128 plus each requested width once" || bad "widths: $out"
+
 # Destroy: the request itself.
 : > "$FAKE_CURL_LOG"
 out=$( PATH="$T/bin:$PATH"; source "$RUN"; CONTAINER_ID=4242; CONTAINER_API_KEY=k; destroy_instance 2>&1 )
