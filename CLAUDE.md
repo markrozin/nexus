@@ -378,6 +378,17 @@ engine (512 net + AVX2, commit 09e1436) played published-rating anchors with
 | Stash v21 | 2714 | 40 | 34-3-3 | ~3070 |
 | Stash v25 | 2937 | 200 | 121-60-19, +109 +/- 42 | **~3045** |
 
+Anna 1.2 (github.com/Lironktf/anna-chess, the bot at chess.lironkatsif.com)
+won the first 30 games outright, all by mate, before the run was stopped: a 0%
+score bounds nothing. It self-reports ~3575 on the CCRL 40/15 scale, which a
+~500 Elo gap from us would match. What it has that we do not: 1024-wide
+threat-input nets trained on Leela T80 plus Stockfish binpacks, aspiration
+windows, ProbCut, late-move pruning, singular extensions, and Stockfish-derived
+tuned constants. Built from source with the `x86_64-pc-windows-gnu` target
+(its Fathom C code is compiled by gcc) and an empty `libgcc_eh.a` shim, since
+w64devkit ships none; it loads files by relative path, so the gauntlet sets
+`OPP_DIR` to its checkout.
+
 Read ~3050 as the top of the range, not a certified rating: CCRL measures at
 2'+1" with standard openings, and faster games plus our random 8-ply book
 both tend to widen the gap in favour of the stronger evaluation. About 2800+
