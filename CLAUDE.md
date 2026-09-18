@@ -366,6 +366,30 @@ history first -- malus on moves that failed to cut, continuation tables -- and
 only then retry late move pruning and the losing-capture demotion. Retrying
 either before that is spending an hour to re-learn this.
 
+### Absolute strength: gauntlets against rated engines
+
+Self-play margins say nothing about absolute strength, so on 2026-09-18 the
+engine (512 net + AVX2, commit 09e1436) played published-rating anchors with
+`sprt/gauntlet.sh`: equal 64 MB hash, `random8.epd`, 10+0.1, `-recover`.
+
+| Opponent | CCRL Blitz | Games | Result | Implied |
+| --- | --- | --- | --- | --- |
+| Cinnamon 2.5 | 2308 | 17 | 16-0-1 (2 wins by opponent crash) | far above |
+| Stash v21 | 2714 | 40 | 34-3-3 | ~3070 |
+| Stash v25 | 2937 | 200 | 121-60-19, +109 +/- 42 | **~3045** |
+
+Read ~3050 as the top of the range, not a certified rating: CCRL measures at
+2'+1" with standard openings, and faster games plus our random 8-ply book
+both tend to widen the gap in favour of the stronger evaluation. About 2800+
+is the conservative claim. The next anchor up is Stash v27 (3057) or v28
+(3092), ideally with a standard book at 60+0.6 or slower.
+
+Stash is distributed as source only (GitLab `mhouppin/stash-bot`); build it
+with w64devkit gcc, overriding `CFLAGS` to drop `-flto`, which that toolchain
+lacks. It ignores commands fired in the same instant as `uci`, which does not
+affect fastchess. Cinnamon 2.5 stalls at 8+0.08, so anchors run at 10+0.1 or
+slower with `-recover`. Third-party binaries live in `opponents/` (ignored).
+
 ### Sleeping the machine invalidates a running match
 
 fastchess times engines by wall clock, so a suspend that lands mid-game flags
