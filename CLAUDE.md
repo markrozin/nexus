@@ -360,6 +360,15 @@ history first -- malus on moves that failed to cut, continuation tables -- and
 only then retry late move pruning and the losing-capture demotion. Retrying
 either before that is spending an hour to re-learn this.
 
+### Sleeping the machine invalidates a running match
+
+fastchess times engines by wall clock, so a suspend that lands mid-game flags
+whichever engine was thinking. A 7-hour sleep through the h512 run produced
+five games decided "loses on time", four of them against the baseline, which
+biases the result toward the new net. Games already finished are fine, but
+fastchess keeps one tally, so the run has to be restarted rather than salvaged.
+Either finish a match before sleeping, or restart it afterwards and say so.
+
 ### Background processes
 
 **Confirm a background task actually died.** A stray process skews every timing
