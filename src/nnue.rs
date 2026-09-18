@@ -124,7 +124,27 @@ pub struct Network {
     /// `2 * HIDDEN`: the side-to-move half, then the other.
     output_weights: Box<[i16]>,
     output_bias: i16,
+    /// Whether a chunk of [`DOT_CHUNK`] output terms is guaranteed to fit in an
+    /// `i32`, decided once from the weights actually loaded. See [`Self::dot`].
+    chunked_dot_fits: bool,
+    /// Whether the AVX2 path may run: this CPU has AVX2, and a block of
+    /// [`DOT_BLOCK`] terms cannot overflow a lane. See [`Self::dot_avx2`].
+    avx2_dot: bool,
 }
+
+/// Output terms summed per `i32` accumulator in the fast dot product. Sixteen
+/// keeps the bound loose enough for any sane net (weights up to 2062) while
+/// still amortising the widening to `i64` over a whole vector register.
+const DOT_CHUNK: usize = 16;
+
+/// Output terms summed per AVX2 register before widening to `i64`. Each of the
+/// eight `i32` lanes takes `DOT_BLOCK / 8` of them, so the bound is loose
+/// enough for any plausible net (weights up to 4125).
+const DOT_BLOCK: usize = 64;
+
+/// `chunks_exact` would silently drop a remainder, so the width must divide.
+const _: () = assert!(HIDDEN % DOT_CHUNK == 0, "HIDDEN must be a multiple of DOT_CHUNK");
+const _: () = assert!(HIDDEN % DOT_BLOCK == 0, "HIDDEN must be a multiple of DOT_BLOCK");
 
 impl Network {
     pub fn load(path: &Path) -> Result<Self, LoadError> {
@@ -153,12 +173,130 @@ impl Network {
         let output_weights = take(2 * HIDDEN);
         let output_bias = take(1)[0];
 
+        // Largest term this net can produce: SCReLU tops out at QA * QA.
+        let peak = output_weights
+            .iter()
+            .map(|w| (*w as i32).unsigned_abs())
+            .max()
+            .unwrap_or(0) as u64
+            * (QA * QA) as u64;
+        let chunked_dot_fits = peak * DOT_CHUNK as u64 <= i32::MAX as u64;
+        let avx2_dot = peak * (DOT_BLOCK / 8) as u64 <= i32::MAX as u64 && avx2_available();
+
         Ok(Self {
             feature_weights,
             feature_bias,
             output_weights,
             output_bias,
+            chunked_dot_fits,
+            avx2_dot,
         })
+    }
+
+    /// Sum of `screlu(value) * weight` over both accumulator halves.
+    ///
+    /// The obvious loop multiplies into `i64`, which is what a leaf evaluation
+    /// spent most of its time on: 64-bit multiplies do not vectorise on any
+    /// 32-bit-lane instruction set, so the compiler emitted one multiply per
+    /// weight. Summing [`DOT_CHUNK`] terms in an `i32` first keeps the whole
+    /// inner loop 32-bit and lets it vectorise, then widens once per chunk.
+    ///
+    /// This is exact, not an approximation: `chunked_dot_fits` proves at load
+    /// time that a chunk cannot overflow, and a net whose weights are too large
+    /// for that falls back to [`Self::dot_wide`]. Both paths return the same
+    /// number, which `chunked_and_wide_dot_products_agree` checks.
+    #[inline]
+    fn dot(&self, us: &[i16; HIDDEN], them: &[i16; HIDDEN]) -> i64 {
+        #[cfg(target_arch = "x86_64")]
+        if self.avx2_dot {
+            // SAFETY: `avx2_dot` is only set when the CPU reports AVX2, and the
+            // load-time bound proves no lane can overflow.
+            return unsafe { self.dot_avx2(us, them) };
+        }
+        if !self.chunked_dot_fits {
+            return self.dot_wide(us, them);
+        }
+        let (own_weights, other_weights) = self.output_weights.split_at(HIDDEN);
+        let mut sum: i64 = 0;
+        for (values, weights) in [(us, own_weights), (them, other_weights)] {
+            for (values, weights) in values.chunks_exact(DOT_CHUNK).zip(weights.chunks_exact(DOT_CHUNK))
+            {
+                let mut chunk: i32 = 0;
+                for (value, weight) in values.iter().zip(weights) {
+                    chunk += screlu(*value) * *weight as i32;
+                }
+                sum += chunk as i64;
+            }
+        }
+        sum
+    }
+
+    /// The same sum on AVX2: sixteen weights per iteration, squared and
+    /// multiplied in 32-bit lanes, widened to `i64` once per [`DOT_BLOCK`].
+    ///
+    /// Bit-identical to [`Self::dot_wide`], which
+    /// `every_dot_product_path_agrees` checks over random networks.
+    ///
+    /// # Safety
+    ///
+    /// The caller must have checked that this CPU supports AVX2 and that
+    /// `avx2_dot` is set, which also proves the accumulation cannot overflow.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn dot_avx2(&self, us: &[i16; HIDDEN], them: &[i16; HIDDEN]) -> i64 {
+        use std::arch::x86_64::*;
+
+        let zero = _mm256_setzero_si256();
+        let qa = _mm256_set1_epi16(QA as i16);
+        let (own_weights, other_weights) = self.output_weights.split_at(HIDDEN);
+        let mut total: i64 = 0;
+
+        for (values, weights) in [
+            (us.as_slice(), own_weights),
+            (them.as_slice(), other_weights),
+        ] {
+            for block in 0..HIDDEN / DOT_BLOCK {
+                let mut lanes = zero;
+                for step in 0..DOT_BLOCK / 16 {
+                    let at = block * DOT_BLOCK + step * 16;
+                    // SAFETY: `at + 16 <= HIDDEN`, and both slices are that
+                    // long; the loads are unaligned, which `loadu` allows.
+                    let (value, weight) = unsafe {
+                        (
+                            _mm256_loadu_si256(values.as_ptr().add(at).cast()),
+                            _mm256_loadu_si256(weights.as_ptr().add(at).cast()),
+                        )
+                    };
+                    let clipped = _mm256_min_epi16(_mm256_max_epi16(value, zero), qa);
+                    // Widen both to 32-bit lanes. The clipped values are
+                    // non-negative so zero-extension is exact; the weights are
+                    // signed, so they go through a shift that sign-extends.
+                    let value_lo = _mm256_unpacklo_epi16(clipped, zero);
+                    let value_hi = _mm256_unpackhi_epi16(clipped, zero);
+                    let weight_lo = _mm256_srai_epi32(_mm256_unpacklo_epi16(weight, weight), 16);
+                    let weight_hi = _mm256_srai_epi32(_mm256_unpackhi_epi16(weight, weight), 16);
+                    // SCReLU squares, then the output weight scales it.
+                    let lo = _mm256_mullo_epi32(_mm256_mullo_epi32(value_lo, value_lo), weight_lo);
+                    let hi = _mm256_mullo_epi32(_mm256_mullo_epi32(value_hi, value_hi), weight_hi);
+                    lanes = _mm256_add_epi32(lanes, _mm256_add_epi32(lo, hi));
+                }
+                let mut spilled = [0i32; 8];
+                // SAFETY: the destination is exactly one 256-bit register wide.
+                unsafe { _mm256_storeu_si256(spilled.as_mut_ptr().cast(), lanes) };
+                total += spilled.iter().map(|lane| *lane as i64).sum::<i64>();
+            }
+        }
+        total
+    }
+
+    /// The same sum, every term widened to `i64`. Correct for any weights.
+    fn dot_wide(&self, us: &[i16; HIDDEN], them: &[i16; HIDDEN]) -> i64 {
+        let mut sum: i64 = 0;
+        for i in 0..HIDDEN {
+            sum += screlu(us[i]) as i64 * self.output_weights[i] as i64;
+            sum += screlu(them[i]) as i64 * self.output_weights[HIDDEN + i] as i64;
+        }
+        sum
     }
 
     #[inline]
@@ -177,11 +315,7 @@ impl Network {
         let us = &acc.values[side_to_move.index()];
         let them = &acc.values[side_to_move.flip().index()];
 
-        let mut sum: i64 = 0;
-        for i in 0..HIDDEN {
-            sum += screlu(us[i]) as i64 * self.output_weights[i] as i64;
-            sum += screlu(them[i]) as i64 * self.output_weights[HIDDEN + i] as i64;
-        }
+        let sum = self.dot(us, them);
 
         // SCReLU squares a QA-scaled value, so the sum carries QA*QA*QB. One
         // division by QA brings it to the bias's QA*QB scale; the last removes
@@ -239,6 +373,20 @@ impl Network {
             pos.side_to_move()
         };
         self.evaluate(&acc, first)
+    }
+}
+
+/// Whether this CPU can run the AVX2 dot product. Checked once per network
+/// load rather than per evaluation: the detection itself is cached by std, but
+/// a branch on a `bool` field is still cheaper in the hot path.
+fn avx2_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
     }
 }
 
@@ -359,6 +507,56 @@ mod tests {
 
     fn synthetic(seed: u64) -> Network {
         Network::from_bytes(&synthetic_bytes(seed, true)).expect("synthetic net loads")
+    }
+
+    /// Every dot-product path must return the same number, bit for bit: the
+    /// chunked one, the AVX2 one where the CPU has it, and the plain 64-bit
+    /// reference. A path that is merely close would shift evaluations by a few
+    /// centipawns and quietly change how the engine plays.
+    #[test]
+    fn every_dot_product_path_agrees() {
+        let mut rng = Rng::new(0x5EED_1234);
+        for seed in 0..8 {
+            let net = synthetic(seed);
+            assert!(net.chunked_dot_fits, "small synthetic weights fit a chunk");
+            for _ in 0..64 {
+                // Values across the whole SCReLU range: below zero (clipped),
+                // inside it, and above QA (clipped again).
+                let mut half = || {
+                    let mut values = [0i16; HIDDEN];
+                    for value in values.iter_mut() {
+                        *value = (rng.below(900) as i32 - 300) as i16;
+                    }
+                    values
+                };
+                let (us, them) = (half(), half());
+
+                let reference = net.dot_wide(&us, &them);
+                assert_eq!(net.dot(&us, &them), reference, "chunked dot product");
+
+                #[cfg(target_arch = "x86_64")]
+                if avx2_available() {
+                    assert!(net.avx2_dot, "AVX2 is available and the bound holds");
+                    // SAFETY: guarded by the same detection the engine uses.
+                    let vectorised = unsafe { net.dot_avx2(&us, &them) };
+                    assert_eq!(vectorised, reference, "AVX2 dot product");
+                }
+            }
+        }
+    }
+
+    /// The shipped net's weights must stay inside the bounds the fast paths
+    /// were proven against, or every evaluation silently falls back.
+    #[test]
+    #[cfg_attr(
+        any(feature = "hidden128", feature = "hidden256"),
+        ignore = "networks/default.bin is 512 wide"
+    )]
+    fn the_embedded_network_takes_the_fast_dot_product() {
+        let net = embedded().expect("networks/default.bin matches the default HIDDEN");
+        assert!(net.chunked_dot_fits, "weights fit the chunked bound");
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(net.avx2_dot, avx2_available(), "AVX2 used when present");
     }
 
     #[test]

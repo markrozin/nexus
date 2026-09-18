@@ -39,3 +39,6 @@
 
 # Browser build output (the wasm is rebuilt by web/build.sh)
 /web/target
+# Third-party engines downloaded for rating anchors; not ours to redistribute.
+/opponents
+/target-native

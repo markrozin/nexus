@@ -309,6 +309,7 @@ W/L/D and pentanomial tallies if you lose the console output anyway.
 | Lichess net (128x2, 191.5M Stockfish-scored positions, WDL 0) vs m10c, [0,5] | stopped early, 141-12-3 | 156 | far above +300 |
 | Same, [0,50] | **H1 accepted**, 34-0 | 34 | not measurable; made default |
 | 512-wide net on the same data vs the 128 net, [0,10] | **H1 accepted**, 173-85-102 | 360 | +86.7 +/- 28.3 |
+| AVX2 output layer (same nodes, +17% nps) | stopped early for the rating gauntlet, LLR 1.79 | 740 | +22.6 +/- 16.4 |
 
 The first network is not a bug: accumulators match a refresh through real
 searches, material values are sane, and it tracks held-out labels (r 0.915) as
@@ -454,7 +455,14 @@ data volume is CPU-bound, not GPU-bound.
   thousands of random move sequences. Same class of bug as mailbox/bitboard
   drift, and it gets the same treatment.
 - Every SIMD path keeps its scalar twin, plus a test asserting the two agree bit
-  for bit.
+  for bit. The output layer has three: an AVX2 one behind runtime detection, a
+  32-bit chunked one, and the plain 64-bit reference, all checked against each
+  other by `every_dot_product_path_agrees`. The fast paths are only taken when
+  the weights actually loaded prove the accumulation cannot overflow, so a net
+  with unusual weights is slow rather than wrong.
+- The 64-bit multiply in the first version of the output layer cost 40% of a
+  leaf evaluation: 64-bit lanes do not vectorise, and neither `target-cpu=native`
+  nor restructuring the scalar loop recovered it. Hand-written AVX2 did.
 - **Training data source: the Lichess evaluation database (decided 2026-09-13).**
   ~410M positions evaluated by Stockfish in users' browsers, CC0, so legally
   unrestricted. The trade-off was taken knowingly: a net trained on it learns
