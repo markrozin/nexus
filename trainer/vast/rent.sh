@@ -42,7 +42,7 @@ MAX_PRICE="${MAX_PRICE:-0.70}"
 MAX_DOLLARS="${MAX_DOLLARS:-3}"
 CREDIT_FLOOR="${CREDIT_FLOOR:-2}"
 # Accumulator widths to train in this one session; see run.sh.
-HIDDENS="${HIDDENS:-128}"
+HIDDENS="${HIDDENS:-512}"
 for h in $HIDDENS; do
     case "$h" in
         128|256|512) ;;
@@ -259,7 +259,7 @@ export HIDDENS="__HIDDENS__" WDLS="__WDLS__" EPOCHS="__EPOCHS__"
 [ -n "$EPOCHS" ] || unset EPOCHS
 exec bash trainer/vast/run.sh __MODE__
 EOF
-sed -i "s/__PRICE__/$PRICE/; s/__MAX_DOLLARS__/$MAX_DOLLARS/; s/__MODE__/$MODE/; s/__HIDDENS__/${HIDDENS:-128}/; s/__WDLS__/${WDLS:-}/; s/__EPOCHS__/${EPOCHS:-}/" "$STATE/launch.sh"
+sed -i "s/__PRICE__/$PRICE/; s/__MAX_DOLLARS__/$MAX_DOLLARS/; s/__MODE__/$MODE/; s/__HIDDENS__/${HIDDENS:-512}/; s/__WDLS__/${WDLS:-}/; s/__EPOCHS__/${EPOCHS:-}/" "$STATE/launch.sh"
 timeout 60 ssh "${SSH_OPTS[@]}" "cat > /workspace/launch.sh" < "$STATE/launch.sh" \
     || die "could not upload the launcher"
 timeout 60 ssh -n "${SSH_OPTS[@]}" \

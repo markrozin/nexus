@@ -260,7 +260,7 @@ build() {
     local h features
     for h in $(widths); do
         features=datagen
-        [ "$h" = 128 ] || features="datagen,hidden$h"
+        [ "$h" = 512 ] || features="datagen,hidden$h"
         log "building netcheck for width $h (the engine, to check the network on this box)"
         (cd "$ENGINE" && with_cap cargo build --release --locked --features "$features" \
             --bin netcheck --target-dir "target-h$h")
@@ -269,7 +269,7 @@ build() {
 
 # Accumulator widths to train. 128 is always built too: the smoke train uses it.
 widths() {
-    echo 128 ${HIDDENS:-128} | tr ' ' '
+    echo 128 ${HIDDENS:-512} | tr ' ' '
 ' | awk 'NF && !seen[$0]++'
 }
 
@@ -277,7 +277,7 @@ widths() {
 # surface only after the data is downloaded and the first net trained.
 need_widths() {
     local h
-    for h in ${HIDDENS:-128}; do
+    for h in ${HIDDENS:-512}; do
         case "$h" in
             128|256|512) ;;
             *) echo "unsupported width '$h' in HIDDENS (128, 256 or 512)" >&2; exit 1 ;;
@@ -532,7 +532,7 @@ session() {
     # but reproduce the evaluation that labelled the data.
     # And one per width in HIDDENS, so a single rental can compare sizes.
     local wdl h finals=""
-    for h in ${HIDDENS:-128}; do
+    for h in ${HIDDENS:-512}; do
         for wdl in ${WDLS:-$default_wdls}; do
             train "$TRAIN_DATA" "nexus-$mode-h$h-wdl$wdl" "$EPOCHS" 16384 "$wdl" "$h"
             netcheck_gate "$TRAINED_NET" "$TRAIN_TEXT" "$h"

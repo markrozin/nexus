@@ -51,9 +51,9 @@ static EMBEDDED: LazyLock<Option<Network>> =
     LazyLock::new(|| Network::from_bytes(EMBEDDED_BYTES).ok());
 
 /// The embedded network, parsed once on first use -- or `None` when this build's
-/// [`HIDDEN`] differs from the width of `networks/default.bin`. A `hidden512`
-/// build testing a candidate net loads that net through `EvalFile` instead,
-/// and must not fail just because the shipped net is narrower.
+/// [`HIDDEN`] differs from the width of `networks/default.bin`. A `hidden128`
+/// build testing a narrower candidate loads that net through `EvalFile`
+/// instead, and must not fail just because the shipped net is wider.
 pub fn embedded() -> Option<&'static Network> {
     EMBEDDED.as_ref()
 }
@@ -64,12 +64,13 @@ pub const INPUTS: usize = 768;
 /// file of any other size rather than reading garbage.
 ///
 /// Fixed at build time, since the accumulator is a stack array sized by it:
-/// 128 by default, or 256 / 512 with the `hidden256` / `hidden512` features.
-#[cfg(not(any(feature = "hidden256", feature = "hidden512")))]
+/// 512 by default (the width of the shipped net), or 128 / 256 with the
+/// `hidden128` / `hidden256` features, which exist to test narrower nets.
+#[cfg(feature = "hidden128")]
 pub const HIDDEN: usize = 128;
-#[cfg(all(feature = "hidden256", not(feature = "hidden512")))]
+#[cfg(all(feature = "hidden256", not(feature = "hidden128")))]
 pub const HIDDEN: usize = 256;
-#[cfg(feature = "hidden512")]
+#[cfg(not(any(feature = "hidden128", feature = "hidden256")))]
 pub const HIDDEN: usize = 512;
 
 pub const QA: i32 = 255;
@@ -556,8 +557,8 @@ mod tests {
 
     #[test]
     #[cfg_attr(
-        any(feature = "hidden256", feature = "hidden512"),
-        ignore = "networks/default.bin is 128 wide"
+        any(feature = "hidden128", feature = "hidden256"),
+        ignore = "networks/default.bin is 512 wide"
     )]
     fn the_embedded_network_loads_and_behaves_like_a_chess_evaluation() {
         // A trained net, not a synthetic one: the start position is level, and

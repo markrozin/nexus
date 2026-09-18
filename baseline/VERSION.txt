@@ -1,3 +1,4 @@
 1b26279
 m10c pending commit: + reverse futility pruning (+86 Elo over m10b)
 nnue128 993ac52: Lichess 128 net default (34-0 over m10c)
+nnue512 7d02c53+: 512-wide Lichess net default (+87 Elo over nnue128)

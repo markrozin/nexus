@@ -1162,8 +1162,8 @@ mod tests {
 
     #[test]
     #[cfg_attr(
-        any(feature = "hidden256", feature = "hidden512"),
-        ignore = "networks/default.bin is 128 wide"
+        any(feature = "hidden128", feature = "hidden256"),
+        ignore = "networks/default.bin is 512 wide"
     )]
     fn alpha_beta_agrees_with_plain_minimax() {
         // The whole point of alpha-beta is that it is exact. Depth 2 only:
@@ -1190,8 +1190,8 @@ mod tests {
 
     #[test]
     #[cfg_attr(
-        any(feature = "hidden256", feature = "hidden512"),
-        ignore = "networks/default.bin is 128 wide"
+        any(feature = "hidden128", feature = "hidden256"),
+        ignore = "networks/default.bin is 512 wide"
     )]
     fn accumulators_stay_in_sync_through_a_real_search() {
         // Every network evaluation inside a real search -- with null moves,

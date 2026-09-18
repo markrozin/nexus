@@ -26,7 +26,7 @@ use nexus::search::{
 
 /// The network the page plays with: trained on 191.5M Lichess positions, and
 /// far stronger than the handcrafted evaluation.
-static NET_BYTES: &[u8] = include_bytes!("../../networks/candidates/lichess-wdl0-40.bin");
+static NET_BYTES: &[u8] = include_bytes!("../../networks/default.bin");
 
 thread_local! {
     /// One search, reused across moves so its transposition table stays warm.

@@ -573,8 +573,8 @@ mod tests {
                 format!("id author {ENGINE_AUTHOR}"),
                 "option name Hash type spin default 16 min 1 max 1024".to_string(),
                 "option name Threads type spin default 1 min 1 max 1024".to_string(),
-                // Wider test builds have no embedded net to default to.
-                if cfg!(any(feature = "hidden256", feature = "hidden512")) {
+                // Narrower test builds have no embedded net to default to.
+                if cfg!(any(feature = "hidden128", feature = "hidden256")) {
                     "option name EvalFile type string default <handcrafted>".to_string()
                 } else {
                     "option name EvalFile type string default <embedded>".to_string()

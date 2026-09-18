@@ -35,12 +35,16 @@ rebuilding, which is how candidate nets get tested. Replace
 `networks/default.bin` only with a net that passed an SPRT against the current
 one.
 
-Widths other than 128 are build features (`hidden256`, `hidden512`) because
-the accumulator is a fixed-size array. Those builds have no embedded net (the
-shipped one is 128 wide), default to the handcrafted evaluation, and exist to
-load wider candidates through `EvalFile`; tests that need the embedded net are
+The shipped net is **512 wide**, trained on the same 191.5M positions; it beat
+the 128 net by +87 Elo. Narrower widths are build features (`hidden128`,
+`hidden256`) because the accumulator is a fixed-size array. Those builds have
+no embedded net, default to the handcrafted evaluation, and exist to load
+narrower candidates through `EvalFile`; tests that need the embedded net are
 ignored in them. Build them into their own target dir, e.g.
-`cargo build --release --features hidden512 --target-dir target-h512`.
+`cargo build --release --features hidden128 --target-dir target-h128`.
+
+Width costs nps but pays for it: 1.66 Mnps at 128, 1.47 at 256, 1.19 at 512 on
+this box, all reaching the same depth in a 5-second search.
 
 The handcrafted `eval` stays. Datagen and bookgen pin it explicitly
 (`Evaluator::Handcrafted`): datagen's quiet filter and `datacheck` compare
@@ -255,7 +259,7 @@ catching changes that are clearly *worse*; they do not rank the good ones.
 It needs **absolute** paths for `cmd=` and `file=`; relative ones fail with
 "process creation failed".
 
-The baseline to test against is `baseline/nexus-nnue128.exe` (gitignored;
+The baseline to test against is `baseline/nexus-nnue512.exe` (gitignored;
 rebuild from the commit named in `baseline/VERSION.txt`). Snapshot a new one
 whenever a change passes.
 
@@ -304,6 +308,7 @@ W/L/D and pentanomial tallies if you lose the console output anyway.
 | Same net at fixed 20K nodes/move (removes the nps gap) | 13-83-4 | 100 | about -300 |
 | Lichess net (128x2, 191.5M Stockfish-scored positions, WDL 0) vs m10c, [0,5] | stopped early, 141-12-3 | 156 | far above +300 |
 | Same, [0,50] | **H1 accepted**, 34-0 | 34 | not measurable; made default |
+| 512-wide net on the same data vs the 128 net, [0,10] | **H1 accepted**, 173-85-102 | 360 | +86.7 +/- 28.3 |
 
 The first network is not a bug: accumulators match a refresh through real
 searches, material values are sane, and it tracks held-out labels (r 0.915) as
@@ -568,6 +573,12 @@ superbatches about 6. The net (`networks/candidates/lichess-wdl0-40.bin`)
 tracks Lichess Stockfish scores at r 0.79 against the handcrafted eval's
 0.49, with slope ~1.1 -- the scale problem of the first net is gone.
 
+Session 7 (2026-09-17, Texas 4090 at $0.456/hr, `HIDDENS="256 512"`): 62
+minutes rent to verified destroy, **~$0.47**. Training is linear in width at
+this size -- 6.6M positions/sec at 256, 6.5M at 512, about 20 minutes per net
+for 40 superbatches -- so sweeping widths in one session costs almost nothing
+beyond the setup. netcheck r: 0.847 (256), 0.858 (512), against 0.79 at 128.
+
 Running from the browser: the Jupyter "direct HTTPS" links need vast's root
 certificate installed, which changes browser security settings -- don't. The
 Instance Portal (plain HTTP on the instance IP) lists Cloudflare tunnels with
@@ -588,7 +599,8 @@ and uploads through the contents API.
 - `magicgen` — the offline magic-constant search. Run once; the output is
   committed as `src/magic_constants.rs`.
 - `bookgen` — opening-book generation for SPRT testing.
-- `hidden256`, `hidden512` — NNUE accumulator width for testing wider nets.
+- `hidden128`, `hidden256` — NNUE accumulator width for testing narrower nets
+  than the shipped 512.
 
 ## Dependencies
 
