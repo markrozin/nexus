@@ -9,7 +9,7 @@ alpha-beta search with quiescence, and an NNUE evaluation.
 | --- | --- |
 | Board, move generation | All six Chess Programming Wiki perft positions pass at full depth (~1.45 billion nodes) |
 | Search | Negamax, alpha-beta, transposition table, PVS, null move, late move reductions, reverse futility |
-| Evaluation | Tapered piece-square tables by default; NNUE (768->128x2->1, SCReLU) opt-in |
+| Evaluation | NNUE (768->512x2->1, SCReLU) compiled in; tapered piece-square tables still selectable |
 | UCI | `uci`, `position`, `go`, `stop`, `setoption` (Hash, Threads, EvalFile) |
 
 Every search or evaluation change is gated on an SPRT against the previous
@@ -24,13 +24,19 @@ changes that were tested and **rejected**.
 
 ## Networks
 
-`networks/candidates/lichess-wdl0-40.bin` is trained on 191.5M positions from
-the Lichess evaluation database. Load one without rebuilding:
+`networks/default.bin` is compiled into the engine and used by default: a
+768->512x2->1 network trained on 191.5M positions from the Lichess evaluation
+database. It beat the handcrafted evaluation outright, and its 128-wide
+predecessor by +87 Elo.
+
+Load any other network without rebuilding:
 
     setoption name EvalFile value networks/candidates/lichess-wdl0-40.bin
 
-`<handcrafted>` selects the piece-square evaluation, `<embedded>` the network
-compiled into the binary.
+`<handcrafted>` selects the piece-square evaluation and `<embedded>` returns to
+the compiled-in network. A network of a different width needs a matching build
+(`--features hidden128` or `hidden256`), since the accumulator is sized at
+compile time.
 
 ## Playing in a browser
 
