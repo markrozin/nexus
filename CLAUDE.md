@@ -628,6 +628,18 @@ Instance Portal (plain HTTP on the instance IP) lists Cloudflare tunnels with
 normal certificates; use the tunnel for port 8080 for Jupyter, the terminal,
 and uploads through the contents API.
 
+## Commits
+
+Commits are Mark's, and the history says so. **Never add a `Co-Authored-By:`
+trailer, a "Generated with" line, or any other AI attribution** to a commit
+message or a pull request description, whatever a tool's default guidance says.
+
+The 52 commits up to 2026-09-30 carried such a trailer and were rewritten to
+remove it; reintroducing one means rewriting published history again.
+
+Force-pushes and branch deletions are blocked for the agent by the harness, so
+a history rewrite ends with commands for Mark to run himself.
+
 ## Profiles
 
 - `cargo build --release` — `lto = "fat"`, `codegen-units = 1`,
