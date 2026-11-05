@@ -50,6 +50,10 @@ The handcrafted `eval` stays. Datagen and bookgen pin it explicitly
 (`Evaluator::Handcrafted`): datagen's quiet filter and `datacheck` compare
 against it, and moving datagen to the network means changing those together.
 
+`docs/HISTORY.md` is the narrative companion to this file: why each decision
+was made, which experiments failed, and what to pick up next. Read it when
+resuming the project on a new machine or after a long gap.
+
 ## Correctness
 
 Move generation is guarded by `perft` against the Chess Programming Wiki's
