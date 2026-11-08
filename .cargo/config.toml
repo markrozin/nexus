@@ -1,5 +1,8 @@
 # Build for the machine doing the compiling. This engine is not distributed as a
 # portable binary; recompile on the target host. Remove or override for CI that
 # publishes artifacts.
-[build]
+#
+# Native targets only: the WebAssembly build (web/) has no host CPU to tune
+# for, and passing it one just prints a warning per crate.
+[target.'cfg(not(target_arch = "wasm32"))']
 rustflags = ["-C", "target-cpu=native"]

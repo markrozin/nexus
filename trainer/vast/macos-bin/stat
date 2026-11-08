@@ -1,0 +1,8 @@
+#!/bin/sh
+# GNU `stat -c %s FILE...` (size in bytes) on macOS, where it is `stat -f %z`.
+# Anything else goes to the system stat unchanged.
+if [ "$1" = "-c" ] && [ "$2" = "%s" ]; then
+    shift 2
+    exec /usr/bin/stat -f %z "$@"
+fi
+exec /usr/bin/stat "$@"

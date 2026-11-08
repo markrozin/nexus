@@ -599,6 +599,15 @@ session cost ~$0.13 -- but the source is unusable at this size. The same CC0
 data is mirrored on Hugging Face (`Lichess/chess-position-evaluations`,
 parquet), served from a CDN.
 
+**The local scripts run on Windows (Git Bash), Linux and macOS.** `prepare.sh`,
+`rent.sh`, `reap.sh` and `guardtest.sh` source `trainer/vast/portable.sh`,
+which sets `$EXE`, `$PYTHON` and `$VASTAI` per platform and, on macOS only,
+puts `trainer/vast/macos-bin/` first on PATH: small stand-ins for the GNU
+`timeout`, `stat -c %s`, `sha256sum` and `shuf -n` forms these scripts use.
+macOS ships bash 3.2, so keep the scripts free of bash 4 features (`declare
+-A`, `mapfile`, `${x,,}`). `run.sh` runs only on the Linux rental and does not
+source the helper; `guardtest.sh` exercises it locally through the stand-ins.
+
 **Rentals run through the API now: `trainer/vast/rent.sh`, not the browser.**
 The vastai CLI (pip, key set by a human) drives search, create, SSH, upload,
 fetch and destroy; `reap.sh` destroys everything and verifies the account is

@@ -28,8 +28,12 @@ echo "building the engine for wasm32-unknown-unknown"
 (cd "$ROOT/web" && cargo build --release --target wasm32-unknown-unknown)
 [ -f "$WASM" ] || { echo "no wasm at $WASM" >&2; exit 1; }
 
+# python3 on macOS and Linux, python on Windows.
+# Windows may have a python3 that is only a Store placeholder, so run it.
+PYTHON="${PYTHON:-$(python3 -c '' > /dev/null 2>&1 && echo python3 || echo python)}"
+
 mkdir -p "$(dirname "$OUT")"
-python - "$PAGE" "$WASM" "$OUT" "$FRAGMENT" <<'PY'
+"$PYTHON" - "$PAGE" "$WASM" "$OUT" "$FRAGMENT" <<'PY'
 import base64
 import sys
 
@@ -62,4 +66,4 @@ print(f"{len(wasm):,} bytes of wasm inlined")
 PY
 
 printf 'standalone %s bytes, artifact fragment %s bytes\n' \
-    "$(stat -c %s "$OUT")" "$(stat -c %s "$FRAGMENT")"
+    "$(wc -c < "$OUT" | tr -d " ")" "$(wc -c < "$FRAGMENT" | tr -d " ")"

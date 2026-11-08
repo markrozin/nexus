@@ -1,0 +1,17 @@
+#!/usr/bin/perl
+# GNU `shuf -n COUNT FILE` on macOS: COUNT lines chosen uniformly at random
+# (reservoir sampling, so the file is read once and never held in memory).
+use strict;
+use warnings;
+my $count;
+if (@ARGV >= 2 && $ARGV[0] eq '-n') { shift; $count = shift }
+elsif (@ARGV && $ARGV[0] =~ /^-n(\d+)$/) { $count = $1; shift }
+defined $count && $count =~ /^\d+$/ or die "shuf: only 'shuf -n COUNT [FILE]' is supported\n";
+my (@pick, $seen);
+while (my $line = <>) {
+    $seen++;
+    if (@pick < $count) { push @pick, $line }
+    else { my $j = int rand $seen; $pick[$j] = $line if $j < $count }
+}
+for (my $i = $#pick; $i > 0; $i--) { my $j = int rand($i + 1); @pick[$i, $j] = @pick[$j, $i] }
+print @pick;

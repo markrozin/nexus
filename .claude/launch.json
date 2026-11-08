@@ -3,7 +3,7 @@
   "configurations": [
     {
       "name": "nexus-web",
-      "runtimeExecutable": "python",
+      "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "8123", "--directory", "dist/web"],
       "port": 8123
     }

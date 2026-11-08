@@ -9,8 +9,10 @@
 
 set -uo pipefail
 
-V="${VASTAI:-/c/Users/Mark/AppData/Roaming/Python/Python314/Scripts/vastai.exe}"
-PY="${PYTHON:-python}"
+# shellcheck source=trainer/vast/portable.sh
+source "$(cd "$(dirname "$0")" && pwd)/portable.sh"
+V="$VASTAI"
+PY="$PYTHON"
 
 list_ids() {
     "$V" show instances --raw 2>/dev/null \

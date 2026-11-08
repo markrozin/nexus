@@ -31,8 +31,10 @@
 set -uo pipefail # deliberately not -e: the destroy path must run after any failure
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-V="${VASTAI:-/c/Users/Mark/AppData/Roaming/Python/Python314/Scripts/vastai.exe}"
-PY="${PYTHON:-python}"
+# shellcheck source=trainer/vast/portable.sh
+source "$ROOT/trainer/vast/portable.sh"
+V="$VASTAI"
+PY="$PYTHON"
 MODE="${1:-lichess}"
 BUNDLE="$ROOT/dist/nexus-train.tar.gz"
 STATE="$ROOT/dist/vast-session"
@@ -124,7 +126,7 @@ ssh_run() { timeout 120 ssh -n "${SSH_OPTS[@]}" "$@"; }
 
 # ---------------------------------------------------------------------------
 log "preflight"
-[ -x "$V" ] || die "vastai CLI not found at $V"
+[ -x "$V" ] || command -v "$V" > /dev/null 2>&1 || die "vastai CLI not found at $V (set VASTAI)"
 [ -f "$BUNDLE" ] || die "missing $BUNDLE -- run prepare.sh first"
 [ -f "$HOME/.ssh/id_ed25519" ] || die "missing ~/.ssh/id_ed25519"
 [ ! -e "$ROOT/dist/VAST_INSTANCE_NOT_DEAD" ] || die "a previous instance was never verified dead; check the console and delete dist/VAST_INSTANCE_NOT_DEAD"
@@ -174,7 +176,7 @@ INSTANCE=$(json 'print(d["new_contract"]) if d.get("success") else sys.exit(1)' 
 echo "$INSTANCE" > "$STATE/instance.id"
 START_EPOCH=$(date +%s)
 DEADLINE_EPOCH=$((START_EPOCH + (CAP_MINUTES + 20) * 60))
-log "instance $INSTANCE created; it is destroyed no later than $(date -d "@$DEADLINE_EPOCH" +%T)"
+log "instance $INSTANCE created; it is destroyed no later than $(clock_time "$DEADLINE_EPOCH")"
 
 past_deadline() { [ "$(date +%s)" -ge "$DEADLINE_EPOCH" ]; }
 
@@ -259,7 +261,7 @@ export HIDDENS="__HIDDENS__" WDLS="__WDLS__" EPOCHS="__EPOCHS__"
 [ -n "$EPOCHS" ] || unset EPOCHS
 exec bash trainer/vast/run.sh __MODE__
 EOF
-sed -i "s/__PRICE__/$PRICE/; s/__MAX_DOLLARS__/$MAX_DOLLARS/; s/__MODE__/$MODE/; s/__HIDDENS__/${HIDDENS:-512}/; s/__WDLS__/${WDLS:-}/; s/__EPOCHS__/${EPOCHS:-}/" "$STATE/launch.sh"
+sed_in_place "s/__PRICE__/$PRICE/; s/__MAX_DOLLARS__/$MAX_DOLLARS/; s/__MODE__/$MODE/; s/__HIDDENS__/${HIDDENS:-512}/; s/__WDLS__/${WDLS:-}/; s/__EPOCHS__/${EPOCHS:-}/" "$STATE/launch.sh"
 timeout 60 ssh "${SSH_OPTS[@]}" "cat > /workspace/launch.sh" < "$STATE/launch.sh" \
     || die "could not upload the launcher"
 timeout 60 ssh -n "${SSH_OPTS[@]}" \

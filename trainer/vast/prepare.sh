@@ -27,6 +27,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
+# shellcheck source=trainer/vast/portable.sh
+source trainer/vast/portable.sh
 
 if [ "${1:-}" = "--lichess" ]; then
     MODE=lichess
@@ -35,7 +37,7 @@ else
     SRC="${1:?usage: bash trainer/vast/prepare.sh data/SOURCE.txt | --lichess}"
     STEM="${SRC%.txt}"
 fi
-BU="${BULLET_UTILS:-tools/bullet-utils.exe}"
+BU="${BULLET_UTILS:-tools/bullet-utils$EXE}"
 SMOKE_DATA=data/tp8.shuffled.data
 SMOKE_TEXT=data/tp8.dedup.txt
 HF_SAMPLE=dist/hf_sample.tsv
@@ -61,13 +63,18 @@ if [ "$MODE" = selfplay ]; then
     [ -f "$SRC" ] || fail "missing $SRC"
 
     log "0. the source file must be complete"
-    if tasklist //FI "IMAGENAME eq datagen.exe" 2>/dev/null | grep -qi datagen.exe; then
+    if [ "$PORTABLE_OS" = windows ]; then
+        running() { tasklist //FI "IMAGENAME eq $1.exe" 2>/dev/null | grep -qi "$1.exe"; }
+    else
+        running() { pgrep -x "$1" > /dev/null; }
+    fi
+    if running datagen; then
         fail "datagen is still running, so $SRC may be incomplete"
     fi
     echo "no datagen running"
 
     log "1. datacheck on the raw file"
-    out=$(./target/release/datacheck.exe "$SRC") || { echo "$out"; fail "datacheck rejected $SRC"; }
+    out=$(./target/release/datacheck$EXE "$SRC") || { echo "$out"; fail "datacheck rejected $SRC"; }
     echo "$out" | grep -E "lines checked|violations|PASS"
 
     log "2. drop positions with no non-king pieces"
@@ -79,10 +86,10 @@ if [ "$MODE" = selfplay ]; then
     echo "kept $after of $before (dropped $((before - after)) bare-king positions)"
 
     log "3. dedup"
-    ./target/release/datadedup.exe "$STEM.nobare.txt" "$STEM.clean.txt"
+    ./target/release/datadedup$EXE "$STEM.nobare.txt" "$STEM.clean.txt"
 
     log "4. datacheck on the cleaned file"
-    out=$(./target/release/datacheck.exe "$STEM.clean.txt") || { echo "$out"; fail "datacheck rejected the cleaned file"; }
+    out=$(./target/release/datacheck$EXE "$STEM.clean.txt") || { echo "$out"; fail "datacheck rejected the cleaned file"; }
     echo "$out" | grep -E "lines checked|duplicate|violations|PASS"
     echo "$out" | grep -q "duplicate boards   0 " || fail "duplicates survived dedup"
 
@@ -112,23 +119,23 @@ if [ "$MODE" = selfplay ]; then
 
     log "8. a random text sample for the final on-box netcheck"
     shuf -n "$CHECK_LINES" "$STEM.clean.txt" > "$STEM.check.txt"
-    ./target/release/datacheck.exe "$STEM.check.txt" > /dev/null || fail "datacheck rejected the check sample"
+    ./target/release/datacheck$EXE "$STEM.check.txt" > /dev/null || fail "datacheck rejected the check sample"
     echo "$(wc -l < "$STEM.check.txt") lines, datacheck PASS"
 else
     log "1. lichesseval --tsv on a sample of the Hugging Face dataset"
     [ -f "$HF_SAMPLE" ] || fail "missing $HF_SAMPLE -- rows of mateuszgrzyb/lichess-stockfish-normalized as TSV"
-    ./target/release/lichesseval.exe --tsv "$HF_SAMPLE" dist/lichess_head.txt 2> dist/lichesseval.log \
+    ./target/release/lichesseval$EXE --tsv "$HF_SAMPLE" dist/lichess_head.txt 2> dist/lichesseval.log \
         || { cat dist/lichesseval.log; fail "lichesseval rejected the sample"; }
     grep -E "^kept|not quiet|r =|PASS" dist/lichesseval.log
     # Syntax only: pyarrow is installed on the rental, not here.
-    python -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" trainer/vast/parquet2tsv.py \
+    "$PYTHON" -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" trainer/vast/parquet2tsv.py \
         || fail "parquet2tsv.py does not parse"
     echo "parquet2tsv.py parses"
 
     log "1b. the rows that stalled session 5 convert in bounded time"
     [ -f "$HF_PATHOLOGICAL" ] || fail "missing $HF_PATHOLOGICAL -- the first 600,000 rows of train-00000.parquet as TSV"
     start=$(date +%s)
-    timeout 120 ./target/release/lichesseval.exe --tsv "$HF_PATHOLOGICAL" dist/pathological.txt 2> dist/pathological.log \
+    timeout 120 ./target/release/lichesseval$EXE --tsv "$HF_PATHOLOGICAL" dist/pathological.txt 2> dist/pathological.log \
         || { tail -5 dist/pathological.log; fail "lichesseval took over 2 minutes on the rows that stalled session 5"; }
     echo "$(wc -l < "$HF_PATHOLOGICAL") rows in $(($(date +%s) - start))s: $(grep -E '^kept' dist/pathological.log)"
 
@@ -138,7 +145,7 @@ else
     [ "$errors" = 0 ] || fail "bullet-utils could not parse $errors converted lines"
     lines=$(wc -l < dist/lichess_head.txt)
     records=$(( $(stat -c %s dist/lichess_head.data) / 32 ))
-    [ "$records" = "$lines" ] || fail "converted $records records from $lines lines"
+    [ "$records" -eq "$lines" ] || fail "converted $records records from $lines lines"
     v=$("$BU" validate --input dist/lichess_head.data)
     echo "$v" | grep -q "No invalid positions!" || fail "bullet validate found invalid positions"
     echo "$lines positions convert and validate cleanly"
@@ -151,8 +158,8 @@ else
 fi
 
 log "9. runbook, trainer and engine"
-for s in run.sh prepare.sh guardtest.sh; do
-    [ "$(tr -cd '\r' < "trainer/vast/$s" | wc -c)" = 0 ] || fail "$s has CRLF line endings"
+for s in run.sh prepare.sh guardtest.sh portable.sh; do
+    [ "$(tr -cd '\r' < "trainer/vast/$s" | wc -c)" -eq 0 ] || fail "$s has CRLF line endings"
     bash -n "trainer/vast/$s" || fail "$s has a syntax error"
 done
 (cd trainer && cargo build --release --locked 2>&1 | tail -1) || fail "trainer does not build against its lockfile"
@@ -169,6 +176,7 @@ work=$(mktemp -d)
 b="$work/nexus-train"
 mkdir -p "$b/trainer" "$b/engine" "$b/data" dist
 cp -r trainer/Cargo.toml trainer/Cargo.lock trainer/src trainer/vast "$b/trainer/"
+rm -rf "$b/trainer/vast/macos-bin"
 # networks/ too: the engine embeds networks/default.bin at compile time.
 cp -r Cargo.toml Cargo.lock src benches networks "$b/engine/"
 cp "$SMOKE_DATA" "$SMOKE_TEXT" "$b/data/"
@@ -192,7 +200,7 @@ fi
 for f in $need; do
     [ -f "$r/$f" ] || fail "bundle is missing $f"
 done
-[ "$(tr -cd '\r' < "$r/trainer/vast/run.sh" | wc -c)" = 0 ] || fail "run.sh in the bundle has CRLF"
+[ "$(tr -cd '\r' < "$r/trainer/vast/run.sh" | wc -c)" -eq 0 ] || fail "run.sh in the bundle has CRLF"
 bash -n "$r/trainer/vast/run.sh" || fail "run.sh in the bundle does not parse"
 rm -rf "$check"
 

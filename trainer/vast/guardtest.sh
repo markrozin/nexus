@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Local tests of the money guardrails in trainer/vast/run.sh. No GPU, no network.
-RUN="$(cd "$(dirname "$0")" && pwd)/run.sh"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+RUN="$HERE/run.sh"
+# run.sh is written for the Linux rental (GNU timeout, stat -c); on macOS this
+# puts stand-ins for those first on PATH so its guardrails can be tested here.
+# shellcheck source=trainer/vast/portable.sh
+source "$HERE/portable.sh"
 T=$(mktemp -d)
 pass=0; failn=0
 ok()  { echo "ok   - $1"; pass=$((pass+1)); }

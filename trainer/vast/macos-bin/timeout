@@ -1,0 +1,57 @@
+#!/usr/bin/perl
+# GNU `timeout` for macOS, which ships without one. Only what the scripts use:
+#
+#   timeout [--signal=SIG] [--kill-after=SECONDS] SECONDS COMMAND [ARG]...
+#
+# Exits 124 if the command ran out of time, 125 on a usage error, 127 if the
+# command could not be started, and otherwise with the command's own status.
+use strict;
+use warnings;
+use POSIX ();
+
+my ($signal, $kill_after) = ('TERM', undef);
+while (@ARGV && $ARGV[0] =~ /^--?(?:s|k|signal|kill-after)/) {
+    my $opt = shift @ARGV;
+    if    ($opt =~ /^--signal=(\S+)$/)     { $signal = $1 }
+    elsif ($opt =~ /^--kill-after=(\S+)$/) { $kill_after = $1 }
+    elsif ($opt eq '-s')                   { $signal = shift @ARGV }
+    elsif ($opt eq '-k')                   { $kill_after = shift @ARGV }
+    else  { print STDERR "timeout: unsupported option $opt\n"; exit 125 }
+}
+$signal =~ s/^SIG//;
+
+sub seconds {
+    my ($text) = @_;
+    $text =~ /^(\d+(?:\.\d+)?)([smhd]?)$/ or do { print STDERR "timeout: bad duration '$text'\n"; exit 125 };
+    return $1 * { '' => 1, s => 1, m => 60, h => 3600, d => 86400 }->{$2};
+}
+my $duration = seconds(shift @ARGV // '');
+$kill_after = seconds($kill_after) if defined $kill_after;
+@ARGV or do { print STDERR "timeout: missing command\n"; exit 125 };
+
+my $pid = fork() // do { print STDERR "timeout: fork: $!\n"; exit 125 };
+if ($pid == 0) {
+    { no warnings 'exec'; exec { $ARGV[0] } @ARGV; }
+    print STDERR "timeout: $ARGV[0]: $!\n";
+    POSIX::_exit(127);
+}
+
+my $timed_out = 0;
+$SIG{ALRM} = sub {
+    if (!$timed_out) {
+        $timed_out = 1;
+        kill $signal, $pid;
+        alarm $kill_after if defined $kill_after;
+    } else {
+        kill 'KILL', $pid;
+    }
+};
+alarm $duration;
+my $got;
+do { $got = waitpid($pid, 0) } while ($got == -1 && $!{EINTR});
+my $status = $?;
+alarm 0;
+
+exit 124 if $timed_out;
+exit 128 + ($status & 127) if $status & 127;
+exit $status >> 8;
